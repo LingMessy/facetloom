@@ -2,85 +2,136 @@
 
 **Multi-Facet AI Engineering Studio**
 
-> 多维拆解 · 智能执行 · 持续对齐
+FacetLoom 是一个从需求到可审核代码变更的 AI 软件工程系统。它为 Agent 提供有边界的上下文和修改范围，为执行保留 Git 检查点，并通过 Gate 持续检查实现是否符合需求和架构约束。
 
-FacetLoom（维织）是一个以多切面组合为核心的 AI 软件工程工作台，旨在将复杂需求拆解为结构化上下文，组织 Agent 执行，并通过 Gate 持续检查工程成果与需求的一致性。
+> 需求有去向，任务有边界，产物有证据。
 
-## 名称含义
+## 核心模型
 
-- **Facet · 切面**：从不同维度描述需求、约束与工程上下文。
-- **Loom · 织机**：将不同切面的上下文编织为完整的软件工程成果。
+Workflow 定义多个 Source Facet。每个 Source Facet 内部通过 Node DAG 表达上下文和执行依赖，Facet 之间不建立边。Workflow 版本根据这些源图派生固定的 Combination Facet，其中包含真正执行的 Combination Node DAG。
 
-**维织**，即将多个维度的需求与上下文，编织成可执行、可检查、可交付的工程过程。
+```text
+Workflow Version
+├── Source Facet
+│   └── Facet Node DAG
+├── Source Facet
+│   └── Facet Node DAG
+└── Combination Facet
+    └── Combination Node DAG
+```
 
-## 核心思想
+例如：
 
-复杂软件需求包含多个相互关联的维度，例如业务模块、用户角色、技术层次和质量要求。
+```text
+Feature: start → Login → end
+         start → Notification → end
 
-FacetLoom 的核心模型是：
+Layer:   start → Domain → Application → Presentation → end
+```
 
-$$
-\mathrm{Facet}_1 \times \mathrm{Facet}_2 \times \cdots \times \mathrm{Facet}_n
-$$
+会形成两条可以并行的执行链：
 
-不同切面的组合形成执行单元。每个执行单元获得明确的上下文和目标，由 Agent 开发，并通过 Gate 检查需求对齐情况。
+```text
+Login × Domain → Login × Application → Login × Presentation
 
-组合模型用于描述可能的工作空间；实际执行范围应根据需求与依赖选择，避免无意义的组合膨胀。
+Notification × Domain → Notification × Application → Notification × Presentation
+```
+
+执行顺序由 Combination Node DAG 决定。Workflow Runtime 找到前置依赖已满足的节点，在并发限制内启动 Combination Worker；Runtime 负责调度和监督，Worker 负责实际运行 Agent、命令、测试、Git 检查点和 Gate。
 
 ## 核心概念
 
-以下是核心术语的初步约定：
-
 | 概念 | 含义 |
 | --- | --- |
-| **Facet · 切面** | 描述项目的一个维度，如业务模块、工程职责或用户角色 |
-| **Node · 节点** | 切面中承载具体需求或上下文的节点 |
-| **Combination · 组合** | 由相关切面的节点组合形成的执行单元 |
-| **Agent · 执行者** | 根据组合提供的上下文完成开发、测试或其他工程任务 |
-| **Gate · 关卡** | 根据明确标准检查成果，判断是否通过或需要调整 |
+| **Requirement** | 一次开发目标，通常绑定独立 Git Branch 和 Worktree |
+| **Workflow** | Source Facet、Facet Node DAG 和 Combination Facet 的版本化定义 |
+| **Source Facet** | 一个需求拆分维度，例如 Feature、Layer 或 Quality |
+| **Facet Node** | Source Facet 中只提供上下文的节点，不单独执行 |
+| **Combination Facet** | 多个 Source Facet 派生出的执行 Facet，在 Workflow 版本内固定 |
+| **Combination Node** | 从每个 Source Facet 选择一个 Facet Node 后形成的业务执行单元 |
+| **Combination Worker** | Runtime 启动的进程或容器，负责一次 Combination Node 执行 |
+| **Gate** | 对执行成果进行需求对齐、验收或授权的关卡 |
 
-## 工作方式
+## 执行闭环
 
 ```text
-需求与约束
+Requirement
     ↓
-定义 Facet 与 Node
+Git Branch + Worktree
     ↓
-选择 Combination，组织执行上下文
+Combination Facet / Combination Node DAG
     ↓
-Agent 执行
+Workflow Runtime 找到 ready Combination Node
     ↓
-Gate 检查
-    ├─ 通过 → 汇集工程成果
-    └─ 需调整 → 反馈到需求、上下文或执行环节
+启动 Combination Worker
+    ↓
+Pre-Assess → Agent / Tool → Artifact → Git Commit → Post-Assess → Gate
+    ↓
+后继节点就绪，或根据 Gate 结果回到上游修复
+    ↓
+集成验证 → Squash Merge → main
 ```
 
-Gate 将需求对齐落实为明确的检查点。检查标准可包括需求覆盖、接口契约、测试结果和验收条件。
+Facet Node 只提供上下文，Combination Node 才真正执行。没有依赖路径的 Combination Node 可以并行。Gate、Commit 和运行记录都绑定具体的 Workflow 版本、Combination Node 和 Git 内容快照。
 
-## 一个简单例子
+## 当前范围
 
-假设项目包含两个切面：
+首版先验证一个 Requirement 的完整闭环：
 
-| 切面 | 节点示例 |
-| --- | --- |
-| 业务模块 | 用户管理、订单管理 |
-| 工程职责 | 前端、后端、测试 |
+- 两个 Source Facet，各自包含少量 Node DAG；
+- 固定生成 Combination Facet 和 Combination Node DAG；
+- Runtime 调度就绪节点，并允许无依赖分支并行；
+- Worker 在隔离 Worktree 和 Rootless Podman 环境中执行；
+- Git Manager 创建组合级 Commit，SQLite 保存运行、Gate 和 Git 引用；
+- WebUI 展示 DAG、Diff、日志、Gate 接管和执行历史。
 
-这些切面可以组成：
+首个适合验证的场景是跨多个架构层的功能需求，例如“登录失败五次后暂时限制登录，并在界面显示剩余等待时间”。
 
-- **用户管理 × 前端**：实现用户管理界面与交互。
-- **用户管理 × 后端**：实现接口、权限与数据处理。
-- **订单管理 × 测试**：验证订单流程与异常场景。
+适用性规则、Combination Node 状态、并行 Worktree 合并、Gate 回退影响范围和多用户运行状态仍在设计中，以 [idea.md](./idea.md) 中的待确认事项为准。
 
-每个组合都应明确需要读取的上下文、预期成果和验收条件。Agent 围绕这些信息执行，Gate 检查成果是否满足约定。
+## 文档
 
-## 设计方向
+- [总体架构与设计共识](./idea.md)：当前唯一的系统设计基准。
 
-- **多维拆解**：从多个切面表达需求及其关联。
-- **上下文组合**：为执行单元组织相关、明确的上下文。
-- **智能执行**：让 Agent 承担边界清晰的工程任务。
-- **持续对齐**：通过 Gate 发现偏差，并将反馈带回工程过程。
-- **过程可追溯**：建立需求、执行单元、产物与验收结果之间的联系。
+当前项目处于想法和架构收敛阶段。安装方式、运行步骤和配置格式将在 Design 阶段确定。
+
+## 研发路线图
+
+### 阶段一：完善 idea
+
+确定领域模型和职责边界，不提前锁定实现细节：
+
+- 明确 Source Facet、Facet Node DAG、Combination Facet 和 Combination Node DAG 的关系；
+- 明确 Combination Node、Combination Node Run、Combination Attempt 和 Combination Worker 的区别；
+- 明确 Workflow Runtime 只调度和监督 Worker；
+- 记录并行分支、DAG 汇合、Gate 回退和 Git 检查点的基本原则；
+- 单独列出尚未决定的状态语义、适用性规则、并行集成和上下文优先级。
+
+阶段产物是 `idea.md`。完成标准是核心术语不重复，执行顺序由 Combination Node DAG 决定，既定设计和待确认事项明确分开。
+
+### 阶段二：建立 design
+
+将 `idea.md` 转换为可以直接实现的技术契约，定义：
+
+- 数据结构、DAG 生成算法和校验规则；
+- Runtime 的 ready 节点计算、并发启动、汇合等待和恢复协议；
+- Combination Worker 的输入、事件、输出、日志和 Attempt 协议；
+- Git、Podman、SQLite、Agent Adapter 和首版 WebUI 的边界。
+
+阶段产物是 `design.md` 以及必要的协议和数据结构草案。完成标准是可以据此拆分代码任务，不需要重新解释核心领域术语或 Runtime 与 Worker 的职责。
+
+### 阶段三：代码 Demo
+
+实现一个可运行的垂直闭环：
+
+1. 创建 Requirement 和 Git Worktree。
+2. 读取两个 Source Facet DAG，生成固定的 Combination Facet 和 Combination Node DAG。
+3. Runtime 为就绪节点启动 Worker，并支持并行分支。
+4. Worker 执行受控命令或 Agent Adapter，输出日志和结构化结果。
+5. Git Manager 创建 Combination Node Commit，SQLite 保存运行和 Gate 记录。
+6. 提供最小 Gate，以及 WebUI 或 CLI 的 DAG、状态、Diff 和日志展示。
+
+Demo 暂不追求完整多用户权限、复杂适用性推断、无限并行、所有模型供应商适配或生产级部署体验。完成标准是用一条真实跨层需求跑通 Requirement、Combination Node、Worker、Commit 到 Gate 的可追踪链路。
 
 ## 命名约定
 
@@ -88,14 +139,6 @@ Gate 将需求对齐落实为明确的检查点。检查标准可包括需求覆
 | --- | --- |
 | 项目名称 | FacetLoom |
 | 中文名称 | 维织 |
-| 产品定位 | AI 软件工程工作台 |
-| 英文定位 | Multi-Facet AI Engineering Studio |
 | 仓库名称 | `facetloom` |
 | CLI 名称 | `facetloom` |
 | 本地配置目录 | `.facetloom/` |
-
-CLI 和配置目录为命名约定，具体用法随实现补充。
-
-## 项目状态
-
-本 README 描述项目的产品定位与核心设计方向。安装方式、运行步骤、配置格式和使用示例将在实现确定后补充。
