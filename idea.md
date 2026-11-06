@@ -1,21 +1,18 @@
 # 多切面组合执行的 AI 软件工程系统
 
-**产品构想与总体架构整理稿 · v0.2**
+**产品构想与架构动机**
 
-**整理日期：2026 年 10 月 29 日**  
-**文档定位：设计共识与后续研发基线；不是最终接口规范。**
+**文档定位：产品目标与后续构想；当前对象和协议以 [Design](design/00-overview.md) 为准。**
 
-> **一句话定义**：一个通过多个 Source Facet 及其内部 Node DAG 从多个维度拆解软件，在派生的 Combination Node DAG 中执行 AI 开发，并通过可委托 Gate 持续进行需求对齐的 Git 原生自动化软件工程系统。
+> **一句话定义**：一个通过多个 Source Facet 及其内部 Node DAG 从多个维度拆解软件，在派生的 Combination Node DAG 中执行 AI 开发，并通过人类 Gate 持续进行需求对齐的 Git 原生自动化软件工程系统。
 
-## 0. 阅读指引与决策状态
+## 0. 阅读指引
 
-这份文档优先整理**已经明确的想法**，不为了完整而引入新的复杂抽象。凡仍属于实现建议或尚未定论的事项，分别标注为「建议」或「待确认」。
+Workflow 与 Facet 表达上下文和依赖，Combination 承担执行，Runtime 负责调度。每次 Run 固定一个 source_commit，Worker 在隔离 detached Worktree 中并行执行。
 
-- **已明确**：Source Facet 内部通过 Node DAG 表达上下文与执行依赖；Facet 之间不建立边；Workflow 版本内固定派生 Combination Facet；Combination Node 是真正的执行单元；合并后的 Combination Node DAG 决定执行顺序并允许无依赖分支并行；Workflow Runtime 只负责启动和监督 Combination Worker；Gate 可人工或 AI 代理；Git Branch + Worktree 进行需求隔离；不自建 Artifact 版本管理；不设独立 AI 智能调度器。
-- **已形成的方案倾向**：WebUI + 后台运行时、无头部署；SQLite 管理本地状态；Podman 隔离 Agent；每次有效 Combination Node 修改创建 Git Commit，最终以 Squash Merge 交付主分支。
-- **尚待验证**：Facet 条件适用性的完整规则、并发上限与并行分支的 Git 集成策略、Gate 回退影响范围的精确计算、多用户/多实例共享运行状态。
+正式定义、已接受代码和精简运行档案统一保存 main。本地状态恢复活动运行，Git 共享已发布证据。Refinement 通过人机交互筛选记录、提出改进，落实并验证后清理已处理记录。
 
----
+具体文件、状态机、交付与精炼协议见 design；本文件解释产品动机和可能的扩展。
 
 ## 1. 出发点与目标
 
@@ -25,7 +22,7 @@ AI 的代码生成能力不断提高，但快速生成 Demo 并不等于长期�
 
 ### 1.2 四个目标
 
-1. **更少的人工成本**：人工集中处理高价值的需求、设计和风险决策，其余 Gate 可以委托 AI。
+1. **更少的人工成本**：AI 先整理评估依据与建议，人类确认需求、Gate、发布与交付。
 2. **更快的开发速度**：多个 Requirement 并行；在组合中先 Assess，避免不必要的实际修改。
 3. **长期可维护**：按架构与 Feature 等维度持续对齐，保持接口、模块边界及整体行为一致。
 4. **安全稳健**：容器隔离、自动测试、可追踪 Gate 决策、Git 检查点与安全合并。
@@ -36,24 +33,28 @@ AI 的代码生成能力不断提高，但快速生成 Demo 并不等于长期�
 
 | 概念 | 定义 | 是否执行开发任务 |
 |---|---|---|
-| **Requirement（需求）** | 一次开发目标；通常对应独立 Git 分支及 Worktree | 否，驱动执行 |
+| **Requirement（需求）** | 一个需求系列；版本纳入 main，每次运行使用隔离 Worktree | 否，驱动执行 |
 | **Workflow（工作流）** | 定义 Source Facet、Facet Node DAG、Combination Facet 及其生成规则的版本化结构 | 由 Runtime 运行 |
-| **Source Facet（源切面）** | 用户定义的一个拆分维度，内部包含 Facet Node DAG，例如 Feature、Layer | 否 |
+| **Source Facet（源切面）** | 用户定义的一个拆分维度，内部包含 Facet Node DAG，例如 Feature、Layer、Quality、Verification | 否 |
 | **Facet Node（切面节点）** | Source Facet 中的上下文节点，提供范围、规则、输入和约束 | **否，绝不单独执行** |
-| **Combination Facet（组合切面）** | 由多个 Source Facet 派生的执行切面；在 Workflow 版本内固定 | 否，承载执行图 |
+| **Combination Facet（组合切面）** | 由多个 Source Facet 按 Workflow 条件过滤后派生的执行切面；在 Workflow 版本内固定 | 否，承载执行图 |
 | **Combination Node（组合节点）** | 从每个 Source Facet 选择一个 Facet Node 形成的节点，属于 Combination Node DAG | **是，唯一的业务执行单元** |
 | **Combination Worker（组合执行器）** | Runtime 为 Combination Node 启动的进程或容器，负责一次实际执行 | 执行 Combination Node |
 | **Gate（决策关卡）** | 针对组合执行成果的需求对齐、验收或授权 | 作为组合执行的一部分 |
 
-**Artifact** 不是独立版本化的核心实体，而是组合执行过程中产生和传递的文件、规范、代码、报告等中间成果，由 Git 承担其正式历史管理。
+**Artifact** 不是独立版本化的核心实体，而是组合执行过程中产生和传递的文件、规范、代码、报告等中间成果，正式代码和精简证据索引由 Git 管理，大型内容保存在 Git 外的持久位置。
 
 ### 2.1 特别重要的边界
 
 - Facet Node **只提供上下文**，不拥有自己的独立 Agent 执行、Artifact 生产或 Gate 审批生命周期。
 - 每个 Source Facet 都有自己的 Node DAG；Source Facet 之间不建立 DAG 边。
-- Combination Facet 是由多个 Source Facet 派生出的执行 Facet，不引入新的业务维度，也不由用户直接维护节点。
+- Combination Facet 是由多个 Source Facet 派生出的执行 Facet，不引入新的业务维度，也不由用户直接维护节点；第一版以 Workflow 版本为生成和复用边界。
+- Workflow 在定义阶段根据已配置条件过滤候选组合并生成 Combination Facet；Requirement 运行时不重新生成另一张结构不同的 Combination Facet。
 - Combination Node 是从每个 Source Facet 选择一个 Facet Node 后形成的组合执行上下文，也是 Combination Node DAG 中的真实业务节点。
+- Requirement 启动时绑定一个不可变的 Workflow 版本；Workflow 修改产生新版本，运行中的 Requirement 不切换版本。
+- 不设置独立的 Requirement Gate；需求级验收或验证由用户在显式的 Verification Source Facet 中创建验证用途的 Facet Node，生成 Combination Node 后按普通执行和 Gate 规则处理。
 - 每个 Combination Node 在完整上下文中由 Combination Worker 运行 Assess → Execution（必要时）→ Artifact/Git Checkpoint → Gate。
+- Agent 可以提出需求、上下文或 DAG 修改建议，但不能未经授权直接修改已激活的 Workflow 或 Combination Facet。
 - 独立的 AI Scheduler 不负责预先分析并分配全部需求。Workflow Runtime 只负责读取 Combination Node DAG、启动和监督 Worker、处理依赖、并发、重试与恢复。
 
 ## 3. Facet 与 Combination Facet：源图与派生执行图
@@ -118,6 +119,8 @@ start
 
 `Login × Domain` 与 `Notification × Domain` 之间没有依赖，因此可以并行。执行顺序由合并后的 Combination Node DAG 决定；字典序不再是执行规则，最多只能作为同一批就绪节点的稳定展示或调度顺序。
 
+当多个前置路径在同一个 Combination Node 汇聚时，该汇聚节点负责接收、比较并处理前置结果之间的冲突，形成后续执行所需的统一输入。Workflow Runtime 只负责等待依赖满足并启动节点，不替汇聚节点做业务冲突裁决；节点无法处理的冲突应进入 Gate 或阻塞状态。
+
 Combination Facet 在 Workflow 版本内固定。Requirement 启动时创建该 Combination Facet 的运行实例，记录上下文快照、执行状态和结果，但不重新定义另一张结构不同的 DAG。Workflow 修改后产生新版本，已有运行继续使用原版本。
 
 ### 3.3 两个典型 Source Facet
@@ -131,6 +134,8 @@ Combination Facet 在 Workflow 版本内固定。Requirement 启动时创建该 
 
 也可以在后续增加 Quality Facet（Security、Accessibility、Performance 等），而不需要发明新的底层 Node 类型。
 
+**Verification Source Facet** 是用于需求验收、集成验证或其他验证用途的显式源切面。用户在其中创建验证用途的 Facet Node；这些节点仍只提供上下文，经过条件过滤并组合后才成为可执行的 Combination Node，不形成独立的 Requirement Gate。
+
 ### 3.4 组合上下文的构成
 
 一个组合运行时读取：
@@ -143,9 +148,9 @@ Combination Facet 在 Workflow 版本内固定。Requirement 启动时创建该 
 
 **原则**：上下文是层层绑定的；不同 Node 的约束冲突时不能默默以后者覆盖前者，应暂停并进入评估或 Gate。
 
-### 3.5 条件适用性（方案建议）
+### 3.5 定义阶段条件过滤
 
-Combination Facet 的结构在 Workflow 版本内固定，但并非每个 Combination Node 都必然对每个 Requirement 产生实际执行。运行时可以根据需求上下文对节点进行适用性评估，避免无意义的 Agent 启动。
+Workflow 按声明顺序对 Facet DAG 应用节点替换积，先生成完整 Combination DAG，再按节点来源映射应用静态排除。删除中间节点后，只为因此失去的可达关系添加旁路边。固定后的 DAG 随 WorkflowRun 保存；Requirement 运行时的 Pre-Assess 不改变图结构。
 
 例如：
 
@@ -153,7 +158,18 @@ Combination Facet 的结构在 Workflow 版本内固定，但并非每个 Combin
 - `Login × Domain × Accessibility`：一般不需要专门的 UI 无障碍检查；
 - 认证、授权及敏感数据相关组合：需考虑 Security 检查。
 
-适用性评估的结果状态、依赖满足规则和后继节点如何处理，暂不在本轮固定。可以先从静态条件 + Combination Worker 的 Pre-Assess 开始。无法可靠判断是否适用时，不应默认跳过关键检查；安全底线不应仅靠 Feature 名称决定。
+条件过滤规则的完整表达式、校验方式和不确定条件的处理，留待 Design。无法可靠判断是否应纳入关键检查时，不应默认过滤；安全底线不应仅靠 Feature 名称决定。
+
+### 3.6 Workflow 与 DAG 的激活不变量
+
+Workflow 版本只有在以下条件都满足时才能激活：
+
+- 每个 Source Facet 的 Node DAG 和生成的 Combination Node DAG 都无环；
+- `start` / `end` 只表示控制边界，不启动 Combination Worker；
+- 每个被激活的业务节点从 `start` 可达，并且能够沿依赖路径到达 `end`；
+- 所有依赖边都指向同一张已生成且已校验的 Combination Node DAG 中的节点。
+
+条件过滤或 Agent 建议导致的非法图不能直接进入运行；必须先由 Workflow 校验拒绝或由用户修订后重新生成版本。
 
 ## 4. Combination Node 与 Combination Worker：真正的执行单元
 
@@ -174,7 +190,7 @@ Git Stage → Git Commit（有实际变更时）
     ↓
 Post-Assess：完整性、额外影响、上游问题
     ↓
-Gate（可配置）：Human / AI Proxy / Automatic
+Gate：AI 提供建议，人类确认
     ↓
 Approved → DAG 中的后继节点可能就绪；Rejected → 修复相关 Combination Node
 ```
@@ -199,7 +215,7 @@ Combination Worker     // 承载 Attempt 的进程或容器
 - 缺少哪些输入、契约或上游设计；
 - 是否触及更高风险、需要额外审核。
 
-若 Pre-Assess 判定不需要修改，可以跳过 Agent 执行和 Commit；是否仍需执行 Gate 或验证，以及该结果的正式状态名称，留待后续状态设计。
+若 Pre-Assess 判定不需要修改，可以跳过代码修改与空 Commit；仍按固定图完成必要验证和人类 Gate，以 no_change 或有理由的 not_applicable 记录结果。
 
 ### 4.2 Execution 与 Artifact
 
@@ -209,23 +225,15 @@ Combination Worker 中的 Agent 在隔离环境中操作**当前 Requirement 的
 
 Post-Assess 检查是否遗漏相关变更、是否引入其他模块影响。Gate 决定是否接受该组合成果、继续执行、返回上游组合或请求人工。
 
-**Facet Node 没有自己的 Gate**；Gate 属于 Combination Node 的执行策略，可按组合上下文覆盖默认规则。
+**Facet Node 没有自己的 Gate**；Gate 评估 Combination 的当前 Attempt，按 Workflow 的人类审核规则处理。
 
-## 5. Gate：可委托的需求对齐机制
+## 5. Gate：对齐与验证
 
-Gate 的目标不仅是代码质量，更是持续地与人类需求、架构要求和整体 Feature 行为对齐。Gate 可以设置得较密集，但不应强迫人类审批每一次结果。
+Gate 持续检查组合成果是否符合人类需求、架构和功能行为。AI 与自动检查提供建议和证据，人类创建最终 GateDecision。
 
-| 模式 | 决策主体 | 典型场景 |
-|---|---|---|
-| **Human** | 人类 | 新需求、重要架构争议、风险较高的授权 |
-| **AI Proxy** | 受委托的独立 AI 审核者 | 常规设计对齐、跨层一致性、阶段验收 |
-| **Automatic** | 规则或测试 | 结构检查、测试通过、格式与接口兼容性 |
+Requirement 不拥有独立 Gate；Verification Facet 表达节点级验证，最终集成检查验证整体结果。决策固定 Attempt、上下文与代码 Tree；变化后的结果不能复用旧批准。
 
-WebUI 应支持**一键委托 AI**与**人工接管**。委托的对象是 Gate 决策，不是无限制地授予 Agent 权限。
-
-Gate 结果至少包括：`Approved`、`Rejected`、`Escalated`、`Blocked`。拒绝时可指向具体的**上游 Combination Node**，而不是笼统地退回某个 Source Facet Node。
-
-所有 Gate 决策应关联已评估的 Git Commit / Tree 和上下文规则，防止文件变化后继续复用旧批准。对于敏感操作，保留不可跳过的权限边界。
+结果为 Approved、Rejected、Escalated、Blocked。拒绝可定位当前或上游 Combination；修复后相关后继重新评估。人类决策与运行结果在关键节点以精简档案发布 main。
 
 ## 6. 上游回退：逻辑回退，而不是默认重写 Git
 
@@ -241,47 +249,48 @@ Login × Presentation  （C3）← Gate 发现领域设计错误
                  C2、C3 重新 Assess / 验证
 ```
 
-**默认策略**：Gate 指定目标 Combination Node，Workflow Runtime 重新启动该节点的 Combination Worker；Agent 基于当前分支**向前修复并追加 Commit**。历史不删除，其他成果可尽量复用。
+**默认策略**：Gate 指定目标 Combination Node，Workflow Runtime 重新启动该节点的 Combination Worker；Agent 基于固定输入**在隔离 Worktree 中创建新 Attempt 和 Commit**，历史结果保留作证据。
 
-**特殊策略**：如果设计方向需要整体放弃，可从旧检查点创建新的修复分支/Worktree，保留原历史作参考；不默认执行破坏性的 `git reset --hard`。
+**特殊策略**：如果设计方向需要整体放弃，可从旧检查点创建新的隔离 Worktree，保留原历史作参考；不默认执行破坏性的 `git reset --hard`。
 
 **尚待设计**：回退后哪些组合必须重新执行。最简单的第一版规则是从受影响组合向后重新 Assess；之后再依据显式依赖减少重跑范围。需要重试上限，避免无限来回。
 
-## 7. Git：唯一的工程版本管理系统
-
-### 7.1 需求并行
+## 7. Git：正式内容与精简运行档案
 
 ```text
-main 工作区（稳定基线；Agent 不直接修改）
-     │
-     ├── feature/REQ-101 → 独立 Worktree → 多个组合执行
-     ├── feature/REQ-102 → 独立 Worktree → 多个组合执行
-     └── feature/REQ-103 → 独立 Worktree → 多个组合执行
+main：正式定义 + 已接受代码 + .facetloom/runs/<run-id>/
+    ↓ source_commit
+    ├── detached Worktree A → 本地 Checkpoint
+    └── detached Worktree B → 本地 Checkpoint
+                                  ↓
+                          汇聚与人类审核
+                                  ↓
+                        最终检查与交付 main
 ```
 
-- 不同 Requirement 的开发独立进行。
-- Combination Node DAG 中没有依赖路径的节点可以并行启动 Worker。
-- 同一 Requirement 内并行写入的 Combination Node 使用隔离的临时 Worktree/Branch，完成后由 Git Manager 集成；有依赖的后继节点等待合并后的共同快照。
-- Git 管理历史、分支、Diff、Merge、Revert、Tag；**不开发第二套 Artifact 版本系统**。
+每个 clone 的 Runtime 独立运行，各 Run ID 隔离档案路径。并行 Worker 用独立 Worktree，不创建命名执行分支。代码快照需要长期或跨 clone 复核时导出持久 Git bundle；YAML 中的 Commit ID 不保证对象被保留。
 
-### 7.2 组合级检查点与交付
+main 上仅运行档案变化不使输入失效；交付比较排除 runs 目录后的正式内容，在最新 main 上保留档案并应用成果。Agent 不直接写 main，Git Manager 根据人类确认更新正式代码。
 
-1. Combination Node 产生修改后，可信 Git Manager 检查允许修改的文件并执行 `git add`。
-2. 对实际变更创建 **Combination Node Commit**，保存本次执行检查点；没有实际变更时不强制创建空提交。
-3. Gate 对已锁定的内容快照作决策；被拒绝的版本仍可以保留用于修复追踪。
-4. Requirement 完成后，在集成环境进行验证，通过 **Squash Merge** 将一个需求的最终变更合并到 main。
-5. 开发分支可按保留策略归档；如果需要长期追踪组合级历史，应保留可达的 Git 引用，避免对象被清理。
+### Refinement（精炼）
 
-**不把 Git Stash 作为常规产物生命周期管理工具。** Stash 适合临时搁置工作，Commit 更适合 Gate 追踪、恢复和多人协作。
+```text
+已结束运行的记录 → 人机筛选事实与问题 → Agent 建议与 Diff
+                                           ↓
+                                  人类采纳、暂留或丢弃
+                                           ↓
+                              应用并验证 → 改进与清理提交
+```
 
-### 7.3 主工作区保护
+只清理已解决或被人类明确丢弃的记录，保留未处理问题及仍被有效引用的证据。验证失败不删除。依据写进改进 Commit，引用删除前的 Git 文件；历史继续可追溯。目标是减少当前目录和 Agent 上下文，不改写 Git 历史以压缩仓库。
 
-Agent 不直接修改 main Worktree；Git 合并与主分支更新由宿主机可信 Git Manager 完成。容器内不开放可写的共享 `.git` 元数据及 Podman 管理 Socket。Worktree 本身不是绝对安全边界，需靠执行权限与容器挂载限制加固。
+完整对话、临时输出和大日志保存在 Git 外，不自建第二套 Artifact 版本系统。Worker 容器不获得 main 凭据、可写共享 Git 元数据或 Podman 管理 Socket；Worktree 之外仍需执行限制与挂载隔离。
 
 ## 8. Podman：隔离 Agent 与开发环境
 
 建议默认使用 **Rootless Podman**，按 Requirement 提供独立容器运行环境：
 
+- Agent 遵循最小权限原则：默认只可操作当前 Combination Node 授权的 Requirement Worktree、工具和路径；已激活的 Workflow 与 Combination Facet 定义只读，修改必须先形成建议并经过授权生成新版本。
 - 串行执行的 Combination Worker 可以复用同需求容器；等待 Gate 时可停止容器；完成需求后删除容器。
 - 一次性测试或高敏感检查可用 `--rm` 临时容器。
 - 并行写入的 Combination Worker 使用独立 Worktree + 容器。
@@ -289,13 +298,13 @@ Agent 不直接修改 main Worktree；Git 合并与主分支更新由宿主机�
 - Git Stage/Commit/Merge 由宿主机可信 Git Manager 负责，不让 Agent 拥有跨分支修改权限。
 - Android 模拟器、设备/KVM 等特殊测试任务可使用单独受控的执行环境，不给普通编码 Agent 默认特权容器。
 
-## 9. WebUI、无头 Runtime 与 SQLite
+## 9. WebUI、无头 Runtime 与运行状态
 
 ### 9.1 产品形态
 
 采用**WebUI + 后台 Runtime**，本地或 Linux 无头服务器均可运行。关闭浏览器或 SSH 连接后，Workflow 仍可继续执行。
 
-- **WebUI**：Source Facet / Facet Node 编辑器、Combination Facet 与 Combination Node DAG 预览、Git Diff、日志、Gate 委托/接管、运行监控。
+- **WebUI**：Source Facet / Facet Node 编辑器、Combination Facet 与 Combination Node DAG 预览、Git Diff、日志、Gate 人类审核、运行精炼、运行监控。
 - **Workflow Runtime**：读取 Combination Node DAG，判断就绪节点，启动和监督 Combination Worker，处理依赖、有限并行、失败恢复与 Gate 流转，**不另设 AI 智能调度器**。
 - **Combination Worker / Agent Adapter**：由 Runtime 启动，调用 Codex 等 Agent 或命令行工具，负责一个 Combination Node 的实际生命周期。
 - **Git Manager / Podman Manager**：提供经过权限控制的宿主机操作。
@@ -304,19 +313,19 @@ Agent 不直接修改 main Worktree；Git 合并与主分支更新由宿主机�
 
 ### 9.2 状态存储
 
-SQLite 保存需求、WorkflowRun、CombinationNodeRun、CombinationAttempt、执行状态、Gate 决策、Git Commit 引用与日志位置。文件内容继续由 Git/文件系统负责。
+Runtime 持久化本地就绪队列、活动 Attempt、Worker/容器引用、重试与恢复状态。Git 保存 Requirement Version、当前版本指针、Workflow 定义、运行摘要、Gate Decision、Checkpoint 和交付记录；大体积日志保存在 Git 外，持久证据使用不可变引用。SQLite 可用于本地缓存与索引；Git 只恢复已发布档案，不保证恢复未发布操作。
 
-本地状态可保存在被 Git 忽略的 dot directory，例如 `.ai-local/state.sqlite`；但实际部署需防止被清理命令删除，并做一致性备份。一个项目的多个 Worktree 应由**同一个受控 Runtime**访问该项目的状态库，不让 Agent 直接改写 Gate 审批数据。
+本地运行状态位于被 Git 忽略的 clone-local 目录。一个 clone 的多个 Worktree 由同一 Runtime 管理；其他 clone 不直接读取或写入本地状态。Git 才是协作记录的来源。
 
 ### 9.3 多用户边界
 
-初期可先实现单 Owner、多设备访问。Git Remote 足以同步代码、规范与 Workflow 文件，但**不能直接同步本地 SQLite 的正在运行状态**。是否提供完整多人共用同一个实例、角色和审批权限，仍待决定；数据结构预留 Actor 与授权范围即可。
+每位协作者在自己的 clone 运行。Git Remote 异步共享已提交定义与运行证据，不共享实时队列或 Worker 状态。新 Requirement Version 取代旧版本后，其他 clone 在下次同步时停止旧运行；发布或集成前须刷新当前版本指针，过期结果不得成为有效成果。实时停止和共享运行面板需要后续引入协作服务。
 
 ## 10. 一条完整需求的端到端示例
 
 **需求**：登录失败五次后临时限制登录，并在界面上提示剩余等待时间。
 
-1. 创建 `feature/REQ-101` 和独立 Worktree，绑定 Workflow 版本。
+1. 在 main 发布需求，创建 Run ID、固定 source_commit，并在独立 detached Worktree 中执行。
 2. Workflow 根据 Feature、Layer 及适用的 Quality Source Facet 固定生成 Combination Facet 与 Combination Node DAG。
 3. Runtime 找到 DAG 中当前就绪的 Combination Node；互不依赖的节点可以并行启动 Worker。
 4. `Login × Domain`：Worker 的 Pre-Assess 发现规则需要变化，Agent 修改领域约束，生成 Commit，Gate 确认规则。
@@ -325,7 +334,8 @@ SQLite 保存需求、WorkflowRun、CombinationNodeRun、CombinationAttempt、�
 7. `Login × Presentation`：在前置依赖满足后修改 BLoC/UI 状态与倒计时提示，经过 UI 对齐 Gate。
 8. 适用的 Security/Accessibility Combination Node 分别验证安全边界与界面可用性；适用性处理规则另行设计。
 9. 如果 UI Gate 发现 Domain 缺少某条业务规则，返回 `Login × Domain`，Runtime 重新启动对应 Worker，并让受影响的后继节点重新 Assess。
-10. 执行集成测试，形成需求的最终候选版本；通过受控 Squash Merge 合并到 main。
+10. 执行集成测试，形成需求的最终候选版本；经人类确认后，以单个集成 Commit 提交 main，随后记录交付回执。
+11. 使用 Refinement 筛选返工记录，采纳并验证改进后清理已处理项。
 
 这条流程最重要的特点是：**一个 Requirement 可以跨多个 Facet 逐步实现并反复需求对齐，但每次真正执行的都是一个明确的组合。**
 
@@ -333,14 +343,14 @@ SQLite 保存需求、WorkflowRun、CombinationNodeRun、CombinationAttempt、�
 
 | 约束 / 风险 | 当前处理原则 |
 |---|---|
-| Combination Node 数量随 Facet 数量快速增加 | Workflow 版本固定候选图；适用性规则 + Pre-Assess；避免每个节点都调用完整 Agent |
+| Combination Node 数量随 Facet 数量快速增加 | 定义阶段条件过滤生成较小的 Workflow 版本候选图；再用 Pre-Assess 避免每个节点都调用完整 Agent |
 | 某些 Node 上下文互相冲突 | 阻塞或进入 Gate，不能隐式覆盖约束 |
 | AI 开发者和 AI 审核者共同误解需求 | Gate 读取原始需求、已确认规则及独立验证证据 |
 | 上游问题造成下游反复返工 | 精确指向上游 Combination Node，修复次数有上限，增量重新 Assess |
-| 并行写入互相覆盖 | Git Worktree/Branch 隔离，Git Manager 受控合并 |
-| SQLite 记录与 Git Commit 非原子 | 重启时核对 Git 引用、内容摘要和运行记录 |
+| 并行写入互相覆盖 | detached Worktree 隔离，Git Manager 受控合并 |
+| 本地运行状态与 Git Commit 非原子 | 重启时核对 Git 引用、内容摘要和运行记录 |
 | 容器访问主仓库和宿主机 | Rootless Podman + 最小权限挂载 + 宿主机 Git Manager |
-| 多人远程 Git 合并后运行记录不共享 | Git 只同步工程成果；共享 Gate/执行状态属于未来协作扩展 |
+| clone 间运行状态有延迟 | 本地状态留在 Runtime；里程碑、Gate 决策和结果摘要发布到 main 的各 Run 目录，其他 clone 同步后查看 |
 
 ## 12. 第一版验证范围与待确认事项
 
@@ -348,19 +358,20 @@ SQLite 保存需求、WorkflowRun、CombinationNodeRun、CombinationAttempt、�
 
 1. 定义两个 Source Facet，分别含少量只提供上下文的 Facet Node DAG。
 2. 固定生成一个 Combination Facet 及其 Combination Node DAG；Runtime 按 DAG 找到就绪节点并允许无依赖分支并行。
-3. 实现 Combination Worker 的 `Pre-Assess → Agent Execution → Git Commit → AI/Human Gate`。
+3. 实现 Combination Worker 的 `Pre-Assess → Agent Execution → 本地 Checkpoint → 人类 Gate`。
 4. Gate 可定向返回上游 Combination Node；修复后重新执行受影响的下游节点。
-5. 每个 Requirement 独立 Worktree 和 Rootless Podman；SQLite 记录运行与审批。
-6. Workflow 完成后运行集成验证，并 Squash Merge 到 main。
-7. WebUI 提供 Facet 编辑、组合预览、Gate 接管与执行历史。
+5. 每个 Requirement 独立 Worktree 和 Rootless Podman；Runtime 持久化本地运行状态，精简决策和结果档案发布到 main。
+6. Workflow 完成后运行集成验证，经人类确认提交单个集成 Commit 到 main。
+7. WebUI 提供 Facet 编辑、组合预览、Gate 审核、执行历史与 Refinement。
 
 ### 仍待明确（不要误认作既定设计）
 
-- **Facet 适用性规则**：条件表达式、AI 辅助适用性判断及“不确定”的处理边界。
+- **定义阶段条件过滤规则**：条件表达式、AI 辅助判断及“不确定”的处理边界。
 - **Combination Node 状态**：`Not Applicable`、`No Change`、`Approved` 等状态的精确定义，以及状态如何满足后继依赖。
 - **并行集成策略**：并发上限、并行 Worker 的 Worktree 合并、冲突处理和汇合节点的共同快照。
 - **上下文来源与优先级**：不同 Node 的输入和约束冲突时的确定流程。
 - **回退影响分析**：先采取保守重评估，再逐步建立精确依赖。
+- **未来的自主审批**：有实际需求后再评估 AI 决策、委托规则和精细权限；当前由人类确认发布。
 - **多用户**：只需多个浏览器控制同一 Owner 的实例，还是需要真正的多人审批与权限分离。
 
 ---
@@ -372,7 +383,7 @@ SQLite 保存需求、WorkflowRun、CombinationNodeRun、CombinationAttempt、�
 ```text
 Requirement
    ↓
-Git Requirement Branch + Worktree
+main 固定输入 + detached Worktree
    ↓
 Workflow Version
    ├─ Source Facet + Facet Node DAG
@@ -388,9 +399,9 @@ Workflow Version
               ↓                                      ↑
        后继节点就绪                         Gate 可返回上游 Node 修复
               ↓
-集成验证 → Squash Merge → main
+集成验证 → 人类确认 → main → Refinement
 ```
 
-> **最终原则**：**Source Facet 定义拆分维度，Facet Node 提供上下文，Combination Facet 承载派生执行图，Combination Node 才真正执行，Gate 持续对齐需求，Git 管理全部工程历史，Workflow Runtime 只负责调度和监督 Combination Worker。**
+> **最终原则**：**Source Facet 定义拆分维度，Facet Node 提供上下文，Combination Facet 承载派生执行图，Combination Node 才真正执行，Gate 持续对齐需求，Git 管理正式内容与已发布证据历史，Workflow Runtime 只负责调度和监督 Combination Worker。**
 
-该设计以**最少的自研基础设施**实现**多维需求对齐、AI 自主执行、可委托审批、Git 原生并行和故障恢复**。它是一份可以开始原型验证的系统构想，而非已经被生产实践证明的最终架构。
+该设计以**最少的自研基础设施**实现**多维需求对齐、AI 自主执行、人类确认与运行精炼、Git 原生并行和故障恢复**。它是一份可以开始原型验证的系统构想，而非已经被生产实践证明的最终架构。
