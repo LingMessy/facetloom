@@ -34,6 +34,7 @@ Facet 之间不直接连边。Workflow 按 `facets` 声明顺序，对每个 Fac
 ├── workflows/<workflow-id>.yaml
 ├── facets/<facet-id>/facet.yaml
 ├── facets/<facet-id>/scopes.yaml          # 可选
+├── evaluators/<evaluator-id>.yaml         # AI / 脚本审核配置
 └── references/...                         # 被 Facet 或 Requirement 引用
 ~~~
 
@@ -73,7 +74,7 @@ integration:
 | facets | 是 | 按稳定顺序排列的 Facet 引用，至少一个 |
 | exclude | 否 | 静态排除规则，默认空列表 |
 | execution | 否 | Agent 与检查点策略；并发配置见 Services |
-| gate | 否 | 默认 Gate 策略 |
+| gate | 否 | 每个普通 Node 继承的默认 Gate 策略 |
 | integration | 否 | 交付前运行的最终检查；格式见下文 |
 
 Facet 列表顺序定义从外到内的替换顺序：`F1 ▷ F2 ▷ ... ▷ Fn`。不是节点执行顺序。替换积结合，因此多 Facet 的分组不影响结果；但不能交换 Facet 顺序。至少一个 Facet；同一 Workflow 不得重复引用同一 Facet ID。
@@ -82,11 +83,29 @@ Facet 列表顺序定义从外到内的替换顺序：`F1 ▷ F2 ▷ ... ▷ Fn`
 | --- | --- | --- |
 | execution.agent | Runtime 配置 | Agent Adapter ID |
 | execution.checkpoint | git-commit | 当前只支持此值；代码输出以 Git Commit 保存 |
-| gate.mode | human | 当前只支持 `human`；AI 提供评估建议，人类确认，见 [Governance](03-governance.md) |
+| gate.mode | human | `human`、`ai_assisted`、`ai` 或 `script` |
+| gate.evaluator | 无 | AI / 脚本评估器 ID；自动评估必须提供匹配类型的配置 |
+| gate.context | 空 | 审核目标、约束与资料；与 Node 的审核上下文累积 |
 
 `integration.checks` 是非空有序检查列表，每项含 Workflow 内唯一的稳定 `id`、非空参数数组 `argv` 和正整数 `timeout_seconds`。命令按参数数组执行，不经 Shell 展开。`integration` 可省略；省略时 WorkflowRun 仍可完成，但不能生成通过的 IntegrationReport 或交付成果。
 
 并发上限属于每个 clone 的 Runtime 配置，不属于 Workflow 语义。
+
+### Node Gate 与组合审核
+
+每个选中 Node 为 Combination 贡献一项 Gate，标识为 `facet_id/node_id`。`mode` 和 `evaluator` 分别按 Node → Workflow 解析；模式最终缺省为 `human`。Node 未声明 `gate` 时完整继承默认配置。有效模式为 `human` 时不调用评估器，快照中的 evaluator 为 null；其他模式缺少评估器或类型不匹配时校验失败。
+
+Workflow 与 Node 的 `gate.context` 使用 `objective`、`constraints`、`references`，字段格式同任务 context。目标与约束累积，资料去重并保留声明来源；不按 Node 顺序覆盖，冲突时阻塞。资料路径相对各自声明文件解析，再固定到 source_commit。
+
+~~~text
+Combination: feature:login × layer:domain
+├── feature/login：继承 Workflow 的 human
+└── layer/domain：Node 指定 ai + domain-reviewer
+                       ↓
+                 两项都批准才接受成果
+~~~
+
+各 Gate 审核同一 Attempt 的固定输出，可并行执行；相同模式也分别记录，不按 Facet 顺序执行，不额外增加 Workflow 总审核。Gate 是 Combination 的审核项，不形成 DAG 业务节点，也不让原始 Node 独立执行。决策与异常处理见 [Governance](03-governance.md)。
 
 ### 排除规则
 
@@ -125,6 +144,13 @@ nodes:
         - ../../references/domain.md
       constraints:
         - 不依赖具体基础设施实现
+    gate:
+      mode: ai
+      evaluator: domain-reviewer
+      context:
+        objective: 审核领域模型及业务边界
+        references:
+          - ../../references/domain-review.md
   - id: application
     role: regular
     context:
@@ -162,8 +188,9 @@ edges:
 | Node name | 否 | 展示名称 |
 | Node scope | 否 | scopes.yaml 中的 Scope ID |
 | Node context | 否 | 普通 Node 的目标、约束和资料引用 |
+| Node gate | 否 | 当前 Node 的审核模式、评估器与审核上下文；未声明字段继承 Workflow |
 
-Facet 和普通 Node 的 `context` 都是可选的，可包含 `objective`、`references` 和 `constraints`。`objective` 可省略，填写时必须是非空文本；Facet 的目标说明其共享上下文，Node 的目标说明该 Combination 的工作边界。`references` 是相对声明文件的资料路径列表，默认空；`constraints` 是约束文本列表，默认空。`start` / `end` 不得声明 `scope` 或 `context`。
+Facet 和普通 Node 的 `context` 都是可选的，可包含 `objective`、`references` 和 `constraints`。`objective` 可省略，填写时必须是非空文本；Facet 的目标说明其共享上下文，Node 的目标说明该 Combination 的工作边界。`references` 是相对声明文件的资料路径列表，默认空；`constraints` 是约束文本列表，默认空。`start` / `end` 不得声明 `scope`、`context` 或 `gate`。
 
 Scope 示例文件 scopes.yaml：
 
@@ -199,6 +226,7 @@ flowchart LR
     F[Facet shared context] --> C
     N[Selected Node context + Scope] --> C
     P[Accepted predecessor outputs] --> C
+    G[各 Node 的有效 Gate 策略与审核上下文] --> C
 ~~~
 
 引用资料保留来源并按内容去重；目标和约束累积，不按列表顺序覆盖。约束冲突时阻塞并请求评估。一个 Scope 内的路径取并集，各选中 Node 的 Scope 之间取交集；未声明 Scope 不增加限制。最终读写范围还须与 Runtime 配置允许的路径取交集。

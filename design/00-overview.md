@@ -7,7 +7,7 @@
 | 00 | 本文 | 系统边界、对象关系和存储位置 |
 | 01 | [Workflow](01-workflow.md) | Facet、Node、Combination 与组合 DAG |
 | 02 | [Requirement](02-requirement.md) | 需求版本、运行对象和状态推进 |
-| 03 | [Governance](03-governance.md) | 人类 Gate、操作边界与 Refinement |
+| 03 | [Governance](03-governance.md) | 四种 Gate 模式、操作边界与 Refinement |
 | 04 | [Execution](04-execution.md) | 上下文、Checkpoint、证据与交付 |
 | 05 | [Services](05-services.md) | Runtime、Git、容器与 Agent 的职责 |
 | 06 | [WebUI](06-user-interface.md) | 查看运行、审核成果、精炼记录 |
@@ -25,7 +25,7 @@ flowchart LR
     WR --> CR[CombinationRun]
     CR --> A[Attempt + Worker]
     A --> C[Checkpoint]
-    C --> G[Human Gate]
+    C --> G[各 Node 的 Gate 全部批准]
     G --> CR
     WR --> I[集成检查与人类确认]
     I --> M[main 上的正式代码]
@@ -46,10 +46,12 @@ Workflow 按 Facet 声明顺序从外到内应用 DAG 节点替换积，例如 `
 | Combination / DAG Snapshot | 固定的业务执行图 | 本地运行状态；发布到 main |
 | WorkflowRun / CombinationRun / Attempt | 一次运行、一个节点及一次尝试的状态 | 本地持久化；关键节点发布精简档案到 main |
 | Context Snapshot / Checkpoint | 固定一次尝试的输入与代码结果 | 本地；发布证据时附持久引用 |
-| GateDecision | 人类对固定成果的评估 | main 的运行档案 |
+| GateReport / GateDecision | 每项 Gate 的评估证据与人类、AI 或程序决策 | main 的运行档案 |
 | IntegrationReport / DeliveryRecord | 最终检查与成功交付回执 | main 的运行档案 |
 | Refinement | 筛选记录、提出并落实改进的交互过程 | 本地会话；结果体现在 main 的修改与 Commit 描述 |
 | Runtime State | 队列、Worker、容器和未发布操作 | clone-local；SQLite 可选 |
+
+每个普通 Node 声明或继承一项 Gate：human、ai_assisted、ai、script。Combination 的各项独立审核同一固定输出，全部批准才接受成果；自动异常转交人类。最终代码交付仍需人类确认。
 
 ## 单 main 与隔离执行
 
@@ -79,6 +81,7 @@ Git 分支只有 `main`。DAG 分支由独立 Worktree 执行；输入与 Checkp
 ├── facets/<facet-id>/
 │   ├── facet.yaml
 │   └── scopes.yaml                       # 可选
+├── evaluators/<evaluator-id>.yaml         # AI / 脚本评估配置
 ├── references/
 ├── runs/<run-id>/                        # main 上的精简档案
 │   ├── run.yaml
@@ -89,11 +92,13 @@ Git 分支只有 `main`。DAG 分支由独立 Worktree 执行；输入与 Checkp
 │   ├── attempts/<attempt-id>.yaml
 │   ├── checkpoints/<checkpoint-id>.yaml
 │   ├── decisions/<decision-id>.yaml
-│   ├── reports/<report-id>.yaml
+│   ├── reports/<report-id>.yaml           # GateReport / IntegrationReport
 │   └── deliveries/<delivery-id>.yaml
 └── .runtime/                             # 加入 gitignore
     ├── runs/<run-id>/                    # 完整状态、待发布记录
     ├── worktrees/<attempt-id>/
+    ├── evaluators/<id>.yaml               # 可选本地配置，有效值写入 Snapshot
+    ├── gate-tasks/<report-id>.yaml         # 活动评估、取消与恢复
     ├── logs/
     ├── refinements/<refinement-id>/
     └── runtime.sqlite                    # 可选

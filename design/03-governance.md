@@ -1,58 +1,131 @@
 # Governance：Gate 与 Refinement
 
-治理由人类审核、固定执行边界和运行精炼组成。正式修改与决策进入 main；执行与精炼会话在本地持久化。
+Gate 按 Node 的审核要求评估 Combination 成果，Refinement 将运行经验转化为改进。正式定义发布、最终代码交付和精炼采纳由人类确认。
 
 ## 对象与职责
 
 | 对象或机制 | 内容 | 保存位置 |
 | --- | --- | --- |
-| GatePolicy | Workflow 的结果评估方式，当前为 human | Workflow 文件 |
-| GateDecision | 对固定 Attempt 输出的人类决策 | main 的运行档案 |
-| Refinement | 人机筛选记录、生成建议、采纳与验证的会话 | 本地 `.runtime/refinements/` |
+| GatePolicy | 模式、审核上下文和评估器配置 | Workflow / Node 声明；有效值固定在 Context Snapshot |
+| GateReport | AI 建议、自动评估结果或故障证据 | main 的运行档案 reports/；大日志使用 Artifact 引用 |
+| GateDecision | 某个 Attempt 的一项 Gate 决策 | main 的运行档案 decisions/ |
+| Refinement | 人机筛选记录、落实改进的会话 | 本地 `.runtime/refinements/` |
 | 改进 Commit | 已落实改动、验证结论、证据来源及清理范围 | main 的 Git 历史 |
 | 执行边界 | 文件、工具、网络、资源与凭据限制 | 本地 Runtime 配置和隔离环境 |
 
-普通 Requirement、Workflow、Facet 和资料修改由人类审阅 Diff 后提交 main。Requirement 内容变化须发布新版本并同 Commit 更新 `current.yaml`；Workflow 和 Facet 通过校验后供新 Run 使用。Refinement 是根据运行记录主动改进的入口，不是所有修改的必经审批层。
+普通定义修改由人类审阅 Diff 后提交 main；Requirement 内容变化须发布新版本并更新 current.yaml。Refinement 是根据运行记录主动改进的入口。所有 main 写入都遵守 Git 凭据与分支保护。
 
-## 操作边界
+## Gate 模式与组合
 
-```text
-Worker / Agent
-├── 在指定 Worktree、路径和工具范围内执行
-├── 提交结果、测试证据、Checkpoint 请求和改进建议
-└── 不持有 main 推送凭据，不自行写入人类决策
+| gate.mode | 评估方式 | 最终决策者 |
+| --- | --- | --- |
+| human | 人类直接审阅材料，不自动请求 AI 建议 | 人类 |
+| ai_assisted | AI 生成建议，人类确认或作出不同结论 | 人类 |
+| ai | AI 独立评审并给出决策 | AI |
+| script | 程序按规则评审并返回结构化结果 | 程序 |
 
-Runtime / Git Manager
-├── 校验输入、状态、修改范围和证据
-├── 发布精简档案
-└── 根据明确的人类确认执行定义发布或集成交付
+每个选中 Node 都贡献一项 Gate，未声明字段继承 Workflow 默认；解析规则见 [Workflow](01-workflow.md)。`gate_id = facet_id/node_id`，在当前 Combination 内唯一。Gate 评估该 Combination 的当前 Attempt；Requirement 不另设 Gate，最终交付保持人类确认。
 
-人类
-└── 确认需求、审核 Gate、选择改进、批准发布与交付
+```mermaid
+flowchart LR
+    A[Attempt 的固定上下文、输出与证据] --> H[feature/login: human]
+    A --> AI[layer/domain: ai]
+    A --> S[verification/dependencies: script]
+    H --> ALL{全部 Approved}
+    AI --> ALL
+    S --> ALL
+    ALL --> P[发布决策与状态]
+    P --> N[满足后继依赖]
 ```
 
-main 写入由 Git 凭据与分支保护控制；不要求额外 PR 分支。项目如使用托管平台审核，Git Manager 遵守其既有保护。Worker 的 Scope 不自动授予访问权，实际范围由 Runtime 与容器限制。AI 可提供评估建议，Gate 的最终决策主体为人类。
+各项可并行，相同模式不自动合并。人类可以一次确认多项，但每项分别保存 Decision。Runtime 汇总全部结果，不增加一次额外总审核。Worker 的 Post-Assess 是自检证据；AI Gate 使用独立评审会话，不直接沿用执行会话的自我批准。
+
+## 评估器与执行边界
+
+`gate.evaluator` 引用 `.facetloom/evaluators/<id>.yaml`；仓库中没有该 ID 时，可从 `.facetloom/.runtime/evaluators/<id>.yaml` 解析本地配置。仓库定义优先，本地不能覆盖同名定义。格式如下；尖括号值在实际配置中替换为具体值。
+
+```yaml
+schema_version: 1
+id: domain-reviewer
+kind: ai
+adapter: codex
+model: <model-id>
+parameters: {}
+instruction: 根据审核要求检查固定输出，逐项引用证据，无法判断时说明缺失信息。
+timeout_seconds: 300
+execution:
+  environment_ref: <immutable-environment-ref>
+  tools: [read, test]
+  network: disabled
+```
+
+| kind | 必填配置 |
+| --- | --- |
+| ai | adapter、非空 model、parameters 对象、非空 instruction |
+| script | 非空 argv 参数数组，例如 `[python3, tools/check_dependencies.py]` |
+| 两者共同 | schema_version=1、id、kind、正整数 timeout_seconds、execution |
+
+`id` 与文件名一致，格式同 Node ID。`execution` 固定可恢复的环境引用、工具列表和网络限制；最终生效权限还受 Runtime 上限约束，并记录在 Snapshot。`ai` 与 `ai_assisted` 要求 kind=ai，`script` 要求 kind=script。AI 参数及本地解析后的配置值必须写入 Snapshot，凭据仅记录类别与用途。输入变化创建新 Attempt，不以修改本地配置偷偷改变已固定策略。
+
+```text
+Worker               → 生成代码与自检证据
+AI / 脚本评估器       → 审核固定成果，返回报告
+人类                 → 人工决策、异常接管、发布与交付确认
+Runtime / Git Manager → 校验主体与策略，保存决策，汇总并发布状态
+```
+
+评估器不持有 main 推送凭据、不直接修改运行记录或被评估成果。评估环境使用固定输出的隔离副本，允许测试产生临时文件；不能把修改后的内容当作原输出审核。脚本从 source_commit 取得可信脚本及评估配置，以固定输出副本为工作目录；不执行 Attempt 擅自改写的审核脚本。AI 工具输出和脚本返回值不能指定人类身份，主体由 Runtime 根据受信会话或评估调用填写。
+
+## GateReport 与评估协议
+
+路径：`.facetloom/runs/<run-id>/reports/<report-id>.yaml`。GateReport 不可变，schema_version 为 1，report_id 使用 UUIDv4，report_type 为 `gate`。
+
+| 字段 | 定义 |
+| --- | --- |
+| run_id、combination_id、attempt_id、gate_id | 所属执行与审核项 |
+| context_snapshot_ref、evaluated_tree、gate_policy_digest | 被评估的固定输入与策略 |
+| previous_decision_id | 发起评估时该 Gate 的前一决策，首次为 null |
+| evaluator | 评估器 ID、kind；实际解析的模型/工具版本等运行信息另记在此 |
+| status | completed 或 error |
+| result | completed 时为 Approved、Rejected、Escalated 或 Blocked；error 时为 null |
+| rationale、evidence_refs | 非空说明和证据引用列表；error 时说明故障 |
+| created_at | UTC ISO 8601 |
+
+Runtime 在调用前分配 report_id 并持久化本地任务；请求固定上述身份、上下文、策略、输入/输出 Commit 和已有证据。审核者可读取 Requirement、任务上下文及自己的审核要求；运行档案只按显式证据引用提供，不作为项目定义输入。
+
+脚本通过 stdin 接收 JSON 请求：`schema_version`、`report_id`、`run_id`、`combination_id`、`attempt_id`、`gate_id`、`context_snapshot_ref`、`gate_policy_digest`、`previous_decision_id`、`input_commit`、`output_commit`、`evaluated_tree`、`evidence_refs`，以及已解析的 `context_snapshot`。引用由 Runtime 提供只读材料供评估器访问。stdout 仅返回一个 JSON 对象，日志写 stderr：
+
+```json
+{
+  "result": "Approved",
+  "rationale": "领域依赖检查通过",
+  "evidence_refs": []
+}
+```
+
+AI Adapter 返回同样的结果结构。`rationale` 必须非空，证据沿用 [Execution](04-execution.md) 的类型化引用。脚本正常退出且返回有效结果才为 completed；退出非零、超时、无效输出或缺失证据引用为 error，不能把退出码直接当成拒绝。程序可以正常退出并返回 Rejected。
+
+`ai_assisted` 的报告只提供建议，不推进状态；人类 Decision 必须引用该报告，可以不同意建议并说明理由。`ai` / `script` 的 completed 报告由 Runtime 转成相同 result 的 Decision；错误报告没有决策主体，不伪造 AI / 程序决策。报告可随 Attempt 的 gate_report_refs 独立发布，使人工审核与故障处理有可共享的依据。
 
 ## GateDecision
-
-Gate 评估一个 Combination 的当前 Attempt，不设独立 Requirement Gate。需求级验证由 Verification Facet 和最终集成检查完成。Workflow 的 `gate.mode` 当前只接受 `human`。
 
 路径：`.facetloom/runs/<run-id>/decisions/<decision-id>.yaml`。
 
 | 字段 | 必填 | 定义 |
 | --- | --- | --- |
-| `schema_version`、`decision_id` | 是 | 格式为 1；ID 为 UUIDv4 |
-| `run_id`、`combination_id`、`attempt_id` | 是 | 被评估对象 |
-| `context_snapshot_ref` | 是 | `contexts/<sha256>.yaml`，由文件名校验内容摘要 |
-| `evaluated_tree` | 是 | 当前 Attempt 代码输出的 Git Tree |
-| `expected_attempt_digest` | 是 | 审核时已发布 Attempt 文件的 SHA-256 |
-| `previous_decision_id` | 是 | 本 Attempt 的前一决策；首次为 null |
-| `gate_policy_digest` | 是 | 固定 Gate 策略的 SHA-256 |
-| `result` | 是 | Approved、Rejected、Escalated 或 Blocked |
-| `rationale`、`evidence_refs` | 是 | 理由和证据列表，可无额外证据 |
-| `decided_by` | 是 | 人类稳定主体 ID，由受信会话确认 |
-| `repair_target_combination_id`、`repair_instruction` | 条件 | Rejected 时可指定当前节点或同 Run 的祖先节点及修复要求 |
-| `created_at` | 是 | UTC ISO 8601 |
+| schema_version、decision_id | 是 | 格式为 1；ID 为 UUIDv4 |
+| run_id、combination_id、attempt_id、gate_id | 是 | 被评估对象及审核项 |
+| context_snapshot_ref | 是 | contexts/<sha256>.yaml，由文件名校验内容摘要 |
+| evaluated_tree、gate_policy_digest | 是 | 固定输出 Tree 与该项有效策略摘要 |
+| expected_attempt_digest | 是 | Runtime 本次写入前校验的已发布 Attempt 文件 SHA-256 |
+| previous_decision_id | 是 | 同 Attempt、同 gate_id 的前一决策，首次为 null |
+| result | 是 | Approved、Rejected、Escalated 或 Blocked |
+| rationale、evidence_refs | 是 | 非空理由与证据引用列表，可无额外证据 |
+| report_ref | 条件 | AI 辅助、AI 或脚本决策必填；指向 GateReport 的类型化引用 |
+| decided_by | 是 | `{kind: human/ai/script, id: <主体 ID>}`，Runtime 填写 |
+| takeover | 条件 | 人工接管自动 Gate 时填写 reason 和 source_refs |
+| repair_target_combination_id、repair_instruction | 条件 | Rejected 时可指定当前节点或同 Run 的祖先及修复要求 |
+| created_at | 是 | UTC ISO 8601 |
 
 ```yaml
 schema_version: 1
@@ -60,27 +133,40 @@ decision_id: <uuid>
 run_id: <run-id>
 combination_id: development/feature:login/layer:domain
 attempt_id: <attempt-id>
+gate_id: feature/login
 context_snapshot_ref: contexts/<sha256>.yaml
 evaluated_tree: <full-tree-oid>
 expected_attempt_digest: sha256:<attempt-file-digest>
 previous_decision_id: null
-gate_policy_digest: sha256:<digest>
+gate_policy_digest: sha256:<gate-policy-digest>
 result: Approved
-rationale: 锁定与恢复行为均通过验证
+rationale: 锁定与恢复行为均符合需求
 evidence_refs: []
-decided_by: user:ling
-created_at: "2026-11-06T12:00:00Z"
+decided_by:
+  kind: human
+  id: user:ling
+created_at: "2026-11-09T12:00:00Z"
 ```
 
-写入前校验 Run 仍有效、Attempt 仍为当前 `waiting_gate`、上下文与输出 Tree 未变，并比较 Attempt 摘要及前一决策 ID。过期请求重新加载后再审核。AI 建议不能填充 `decided_by` 冒充人类确认。
+`human` / `ai_assisted` 只接受 human 主体；`ai` / `script` 正常决策主体必须与模式及报告评估器一致。自动模式异常或明确无法判断时暂停该项，允许人类补充决策或请求原模式重评；人工接管需记录原因、原报告或升级决策引用，保留原策略。ai_assisted 建议生成失败时，人类可引用错误报告继续审核并记录原因。没有自动失败重试循环。
 
-| 结果 | 状态变化 |
+### 汇总、并发与发布
+
+Attempt 使用 `gate_decision_refs` 按 gate_id 保存各项最新 Decision；GateReport 用 `gate_report_refs` 记录各项最新报告。未产生决策的项视为待审，不单独建立 GateRun 对象。
+
+| 情况 | Attempt / CombinationRun |
 | --- | --- |
-| Approved | Attempt → accepted；CombinationRun → satisfied |
-| Rejected | Attempt → rejected；CombinationRun → blocked，修复规则见 Requirement |
-| Escalated / Blocked | 保持 waiting_gate；补齐条件后创建新的 Decision |
+| 部分 Approved，其余未完成 | 保持 waiting_gate |
+| 全部最新决策为 Approved | accepted / satisfied，发布成功才解锁后继 |
+| 任一 Rejected | rejected / blocked，取消其余未完成评估；人类确认后才创建新 Attempt |
+| Escalated、Blocked 或评估 error | 保持 waiting_gate，转交人类处理；其他独立项可继续 |
+| 输入失效、取消或已有终态 | 取消活动评估，不接收迟到结果 |
 
-Decision 不编辑覆盖；新评估产生新 ID。决策及相关 Attempt、CombinationRun、WorkflowRun 状态同 Commit 发布。发布成功后才解锁后继；推送失败时本地保留待发布操作，不提前接受成果。
+发起评估、人工确认和人工接管都绑定同一 `(attempt_id, gate_id, context_snapshot_ref, evaluated_tree, gate_policy_digest, previous_decision_id)`；报告任务还绑定 report_id。同一审核项同时最多一个活动评估任务。接管或明确重评前撤销旧任务，本地持久化撤销信息；迟到报告不进入有效引用，也不能自动生成 Decision。
+
+Runtime 串行接收各项结果，校验 Run 有效、Attempt 仍为当前 waiting_gate、固定输入及该项前一决策未变。其他 Gate 更新导致的 Attempt 摘要变化可以在重新校验后合并；不要求重新评审未变的成果。`expected_attempt_digest` 记录合并时实际读取的版本，Git Manager 仍以该摘要进行原子校验。该项前一决策变化或材料变化时拒绝过期操作。新报告不允许替换已 Approved 的项；Rejected 后整个 Attempt 已终止。
+
+Decision 与关联状态作为同一 main Commit 发布；引用的报告须同 Commit 发布或已存在且内容匹配。失败时保留本地待发布操作，不提前接受成果。以报告/决策 ID 去重，重启或重放不得重复生成决策。新评估使用新 ID，历史文件不覆盖。新 Attempt 的所有 Gate 都须重新审核，即使复用 Context Snapshot 也不能继承批准。
 
 ## Refinement：运行精炼
 

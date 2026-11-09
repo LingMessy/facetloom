@@ -12,7 +12,7 @@
 │   ├── Summary / 未解决问题
 │   ├── DAG / CombinationRun / Attempt
 │   ├── Diff / Checkpoint / Evidence
-│   ├── GateDecision
+│   ├── Gates / GateReport / GateDecision
 │   └── IntegrationReport / DeliveryRecord
 ├── Refinement：运行精炼
 │   ├── 选择记录与确认事实
@@ -26,7 +26,7 @@
 | Requirement | current、版本、关联运行 | 审阅并发布新版本、启动 Run |
 | Workflow | Facet、Scope、校验、DAG 预览 | 审阅定义修改并发布 |
 | Run | 本地状态与已发布状态、结果、问题和证据 | 取消、重试、请求交付或明确放弃未交付成果 |
-| Gate | 固定 Attempt、上下文、代码 Diff、验证、AI 建议 | Approved、Rejected、Escalated、Blocked |
+| Gate | 各 Node 的模式、审核要求、报告、决策主体与汇总状态 | 人工项决策、批量确认、异常接管或请求重评 |
 | Delivery | 候选代码、最终报告、当前需求与基线检查 | 确认交付 |
 | Refinement | 已结束运行、筛选项、建议、拟修改和删除内容 | 采纳、暂留、丢弃、确认提交 |
 | Local Runtime | Worker、容器、待发布操作、同步与恢复 | 停止 Worker、恢复本地运行 |
@@ -41,7 +41,7 @@ flowchart LR
     DB --> P
 ```
 
-节点显示 Combination ID、状态、直接前驱、当前与有效 Attempt、输入/输出和最近决策。汇聚节点列出未满足前驱；blocked、stale 和 cancelled 显示原因。运行页分别显示「运行完成」「待交付」「已交付」。
+节点显示 Combination ID、状态、直接前驱、当前与有效 Attempt、输入/输出和各 Gate 的最近决策。汇聚节点列出未满足前驱；blocked、stale 和 cancelled 显示原因。运行页分别显示「运行完成」「待交付」「已交付」。
 
 Gate 页面固定显示：
 
@@ -50,10 +50,19 @@ Requirement → WorkflowRun → Combination → Attempt
                                             ↓
                   Context Snapshot + 输出 Tree + Evidence
                                             ↓
-                              AI 评估建议 + 人类决策
+                   feature/login    layer/domain
+                   human            ai / script / ai_assisted
+                        ↓            ↓
+                       分项报告与决策
+                              ↓
+                         全部批准才接受
 ```
 
-提交前后端校验当前 Attempt、文件摘要、上下文、Tree 和前一决策。过期页面要求重新载入，提交成功的 Decision 不编辑。其它 clone 的用户通过拥有者服务提交决定；仅有 Git 档案不能接管活动 Worker。
+每项显示 gate_id、来源 Node、有效模式与策略、评估进度、审核结论、实际主体和依据。human 不自动生成 AI 建议；ai_assisted 显示建议及人类确认入口；ai / script 显示自动结果。无决策显示待审，报告 error 显示评估故障，不能显示为成果被拒绝。部分批准显示进度，如“1/2 已批准”。
+
+自动项异常或明确无法判断时显示人工接管和请求重评入口；接管填写原因，保留原策略与证据。批量确认逐项绑定固定材料并创建独立 Decision，不能用一次点击绕过未完成的自动项。
+
+提交前后端校验当前 Attempt、gate_id、策略、上下文、Tree 和该项前一决策；Runtime 校验最新文件摘要。其他 Gate 的并发更新不要求重新审核未变的材料；当前项或材料过期时重新载入。已提交 Decision 不编辑。其它 clone 的用户通过拥有者服务提交决定；仅有 Git 档案不能接管活动 Worker。最终 Delivery 页面始终要求人类确认。
 
 ## Refinement 交互
 

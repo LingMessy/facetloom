@@ -13,8 +13,10 @@ flowchart TD
     CR --> AT[Attempt]
     AT --> CS[Context Snapshot]
     AT --> CP[Checkpoint]
-    AT --> GD[GateDecision]
-    GD --> CR
+    AT --> GR[各 Gate 的报告]
+    AT --> GD[各 Gate 的决策]
+    GD --> ALL[全部批准]
+    ALL --> CR
 ```
 
 一次 WorkflowRun 固定一个 Requirement Version、一个输入 Commit 和一份组合 DAG。每个业务 Combination 在该 Run 中最多有一条 CombinationRun；每次执行或重试都创建新的 Attempt。
@@ -101,7 +103,7 @@ WorkflowRun 的必需字段如下：
 启动流程：
 
 1. 获取 main 最新头，固定完整 OID 为 `source_commit`。
-2. 校验 current 指针、Requirement、Workflow、Facet 和引用资料；拒绝引用运行档案作为输入。
+2. 校验 current 指针、Requirement、Workflow、Facet、有效 Gate 策略、评估器配置和引用资料；拒绝引用运行档案作为定义或资料输入。
 3. 生成并校验 DAG，将 run.yaml、dag.yaml 和初始状态原子持久化到本地，再发布初始精简档案到 main。
 4. 再次同步检查 current 指针。需求已过期则取消；否则调度节点。仅运行档案的提交不影响固定输入。
 
@@ -132,7 +134,7 @@ stateDiagram-v2
     cancelled --> [*]
 ```
 
-本地记录保存实时状态，main 显示最近已发布状态。Worker 的开始与结束在本地持久化后再推进；等待 Gate、Gate 决策、失败、取消、运行完成与交付是档案发布节点。未发布操作重启后重放，不能因 Git 推送失败而丢失。Gate 批准须发布成功后才满足后继依赖。
+本地记录保存实时状态，main 显示最近已发布状态。Worker 的开始与结束在本地持久化后再推进；等待 Gate、Gate 决策、失败、取消、运行完成与交付是档案发布节点。未发布操作重启后重放，不能因 Git 推送失败而丢失。全部 Gate 批准须发布成功后才满足后继依赖。
 
 ## 运行档案
 
@@ -146,7 +148,7 @@ stateDiagram-v2
 ├── attempts/<attempt-id>.yaml
 ├── checkpoints/<checkpoint-id>.yaml
 ├── decisions/<decision-id>.yaml
-├── reports/<report-id>.yaml
+├── reports/<report-id>.yaml              # GateReport / IntegrationReport
 └── deliveries/<delivery-id>.yaml
 ```
 
@@ -244,9 +246,10 @@ updated_at: "2026-11-04T12:00:00Z"
 | --- | --- | --- |
 | 开始执行 | 创建 `pending`，启动后为 `running` | `running` |
 | 执行结束，材料完整 | `waiting_gate` | `waiting_gate` |
-| Gate `Approved` | `accepted` | `satisfied`，设置 `accepted_attempt_id` |
-| Gate `Rejected` | `rejected` | `blocked`；人类确认重试后回到 `pending` |
-| Gate `Escalated` / `Blocked` | 保持 `waiting_gate` | 保持 `waiting_gate`，等待后续决策 |
+| 部分 Gate `Approved` | 保持 `waiting_gate` | 保持 `waiting_gate` |
+| 全部 Gate `Approved` 且发布成功 | `accepted` | `satisfied`，设置 `accepted_attempt_id` |
+| 任一 Gate `Rejected` | `rejected`，取消其余活动评估 | `blocked`；人类确认重试后回到 `pending` |
+| Gate `Escalated` / `Blocked` 或评估故障 | 保持 `waiting_gate`，保存报告或决策 | 保持 `waiting_gate`，等待人类处理该项；其余项可继续 |
 | Worker 失败或丢失 | `failed` | `blocked`；人类确认重试后回到 `pending` |
 | 输入失效 | 活动 Attempt 变为 `cancelled` | `stale`，清空 `accepted_attempt_id` |
 | WorkflowRun 取消 | 活动 Attempt 变为 `cancelled` | 未满足节点为 `cancelled`，已满足节点保留历史 |
@@ -265,9 +268,9 @@ domain → pending → 新 Attempt
 后继在各自前驱重新 satisfied 后依次进入 pending
 ~~~
 
-默认不自动重试；人类确认重试后创建新 Attempt。输入不变时可复用 Context Snapshot，失败或拒绝的代码仅作为证据参考，不自动成为新输入。
+默认不自动重试；人类确认重试后创建新 Attempt。输入不变时可复用 Context Snapshot，但新 Attempt 的所有 Gate 必须重新审核；失败或拒绝的代码仅作为证据参考，不自动成为新输入。
 
-修复范围为目标节点加全部可达后继，未执行的后继也进入 `stale`；无依赖分支继续运行。目标必须是当前节点或其祖先。修复决定及原决策引用写入状态原因，并传入新 Context Snapshot。依赖再次满足后，Runtime 将已由人类确认的修复范围内的 `stale` 节点转回 `pending`。
+自动 Gate 的修复建议先阻塞当前成果，须经人类确认才安排修复。修复范围为目标节点加全部可达后继，未执行的后继也进入 `stale`；无依赖分支继续运行。目标必须是当前节点或其祖先。修复决定及原决策引用写入状态原因，并传入新 Context Snapshot。依赖再次满足后，Runtime 将已由人类确认的修复范围内的 `stale` 节点转回 `pending`。
 
 ### 状态原因
 
@@ -320,7 +323,8 @@ stateDiagram-v2
 | `outcome` | 条件 | 进入 waiting_gate 时填写 changed、no_change 或 not_applicable；执行失败可为空。 |
 | `summary` | 条件 | waiting_gate 或终态时的简短结果；not_applicable 必须说明理由。 |
 | `output_refs` | 是 | 带类型的不可变输出引用，初始为空；等待 Gate 时恰有一个 `role: code` 的 Commit 引用。格式见 [Execution](04-execution.md)。 |
-| `gate_decision_ref` | 否 | 指向运行档案内最近一次 `decisions/<decision-id>.yaml`；先前决策文件保留。 |
+| `gate_decision_refs` | 是 | gate_id → `decisions/<decision-id>.yaml` 的映射，初始为空；每项指向该 Gate 的最新决策。 |
+| `gate_report_refs` | 是 | gate_id → `reports/<report-id>.yaml` 的映射，初始为空；保存最新建议、自动结果或故障报告。 |
 | `status_reason` | 条件 | `failed` 或 `cancelled` 时的原因。 |
 | `created_at` | 是 | 创建时间，使用 UTC ISO 8601。 |
 | `started_at`, `finished_at` | 否 | Worker 开始及 Attempt 进入终态的时间；尚未发生时为空。 |
@@ -340,21 +344,22 @@ status: pending
 outcome: null
 summary: null
 output_refs: []
-gate_decision_ref: null
+gate_decision_refs: {}
+gate_report_refs: {}
 created_at: "2026-11-04T12:00:00Z"
 started_at: null
 finished_at: null
 updated_at: "2026-11-04T12:00:00Z"
 ```
 
-Attempt 身份和输入字段在首次本地持久化后不可改；`outcome` 和代码输出在进入 `waiting_gate` 时固定。等待评估期间只可追加证据和 Gate 引用；代码或输入变化须创建新 Attempt。`worker_ref` 是本地进程或容器引用，不写入 Git。
+Attempt 身份和输入字段在首次本地持久化后不可改；`outcome` 和代码输出在进入 `waiting_gate` 时固定。Gate 映射键必须来自 Snapshot 的有效 Gate 列表，目标必须匹配同一 Attempt、gate_id、上下文、策略和输出 Tree；历史报告及决策文件保留。等待评估期间只可追加证据和更新各项 Gate 引用；代码或输入变化须创建新 Attempt。`worker_ref` 是本地进程或容器引用，不写入 Git。
 
 | 状态 | 定义 |
 | --- | --- |
 | `pending` | Attempt 已固定输入，尚未启动 Worker。 |
 | `running` | Worker 正在执行。 |
 | `waiting_gate` | Worker 执行结束，等待 Gate 决策。 |
-| `accepted` | Gate 策略通过，结果已登记为当前有效输出。 |
+| `accepted` | 所有 Gate 批准且发布成功，结果已登记为当前有效输出。 |
 | `rejected` | Gate 拒绝；结果保留为证据，不可用作后继输入。 |
 | `failed` | Worker 或执行基础设施失败。 |
 | `cancelled` | Attempt 被停止、取消或其运行已被废弃。 |

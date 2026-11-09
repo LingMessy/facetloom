@@ -4,7 +4,7 @@
 
 **文档定位：产品目标与后续构想；当前对象和协议以 [Design](design/00-overview.md) 为准。**
 
-> **一句话定义**：一个通过多个 Source Facet 及其内部 Node DAG 从多个维度拆解软件，在派生的 Combination Node DAG 中执行 AI 开发，并通过人类 Gate 持续进行需求对齐的 Git 原生自动化软件工程系统。
+> **一句话定义**：一个通过多个 Source Facet 及其内部 Node DAG 从多个维度拆解软件，在派生的 Combination Node DAG 中执行 AI 开发，并通过可配置 Gate 持续进行需求对齐的 Git 原生自动化软件工程系统。
 
 ## 0. 阅读指引
 
@@ -22,7 +22,7 @@ AI 的代码生成能力不断提高，但快速生成 Demo 并不等于长期�
 
 ### 1.2 四个目标
 
-1. **更少的人工成本**：AI 先整理评估依据与建议，人类确认需求、Gate、发布与交付。
+1. **更少的人工成本**：Gate 支持人类、AI 辅助、AI 与脚本决策；人类确认需求、正式发布与最终交付。
 2. **更快的开发速度**：多个 Requirement 并行；在组合中先 Assess，避免不必要的实际修改。
 3. **长期可维护**：按架构与 Feature 等维度持续对齐，保持接口、模块边界及整体行为一致。
 4. **安全稳健**：容器隔离、自动测试、可追踪 Gate 决策、Git 检查点与安全合并。
@@ -46,7 +46,7 @@ AI 的代码生成能力不断提高，但快速生成 Demo 并不等于长期�
 
 ### 2.1 特别重要的边界
 
-- Facet Node **只提供上下文**，不拥有自己的独立 Agent 执行、Artifact 生产或 Gate 审批生命周期。
+- Facet Node 提供任务上下文和 Gate 声明，不拥有独立 Agent 执行或 Artifact 生产；审核发生在组合后的 Attempt 上。
 - 每个 Source Facet 都有自己的 Node DAG；Source Facet 之间不建立 DAG 边。
 - Combination Facet 是由多个 Source Facet 派生出的执行 Facet，不引入新的业务维度，也不由用户直接维护节点；第一版以 Workflow 版本为生成和复用边界。
 - Workflow 在定义阶段根据已配置条件过滤候选组合并生成 Combination Facet；Requirement 运行时不重新生成另一张结构不同的 Combination Facet。
@@ -190,7 +190,7 @@ Git Stage → Git Commit（有实际变更时）
     ↓
 Post-Assess：完整性、额外影响、上游问题
     ↓
-Gate：AI 提供建议，人类确认
+Gate：各 Node 的审核项按配置决策，全部批准
     ↓
 Approved → DAG 中的后继节点可能就绪；Rejected → 修复相关 Combination Node
 ```
@@ -215,7 +215,7 @@ Combination Worker     // 承载 Attempt 的进程或容器
 - 缺少哪些输入、契约或上游设计；
 - 是否触及更高风险、需要额外审核。
 
-若 Pre-Assess 判定不需要修改，可以跳过代码修改与空 Commit；仍按固定图完成必要验证和人类 Gate，以 no_change 或有理由的 not_applicable 记录结果。
+若 Pre-Assess 判定不需要修改，可以跳过代码修改与空 Commit；仍按固定图完成必要验证和各项 Gate，以 no_change 或有理由的 not_applicable 记录结果。
 
 ### 4.2 Execution 与 Artifact
 
@@ -225,11 +225,11 @@ Combination Worker 中的 Agent 在隔离环境中操作**当前 Requirement 的
 
 Post-Assess 检查是否遗漏相关变更、是否引入其他模块影响。Gate 决定是否接受该组合成果、继续执行、返回上游组合或请求人工。
 
-**Facet Node 没有自己的 Gate**；Gate 评估 Combination 的当前 Attempt，按 Workflow 的人类审核规则处理。
+**Facet Node 可声明 Gate**，未声明字段继承 Workflow 默认；每个选中 Node 贡献一项审核，评估 Combination 的当前 Attempt，全部批准才接受成果。
 
 ## 5. Gate：对齐与验证
 
-Gate 持续检查组合成果是否符合人类需求、架构和功能行为。AI 与自动检查提供建议和证据，人类创建最终 GateDecision。
+Gate 持续检查组合成果是否符合人类需求、架构和功能行为。Gate 有 human、ai_assisted、ai、script 四种模式，分别由人类、人类、AI、程序决策。各项可以并行，异常暂停并交由人类处理；最终交付仍由人类确认。
 
 Requirement 不拥有独立 Gate；Verification Facet 表达节点级验证，最终集成检查验证整体结果。决策固定 Attempt、上下文与代码 Tree；变化后的结果不能复用旧批准。
 
@@ -263,7 +263,7 @@ main：正式定义 + 已接受代码 + .facetloom/runs/<run-id>/
     ├── detached Worktree A → 本地 Checkpoint
     └── detached Worktree B → 本地 Checkpoint
                                   ↓
-                          汇聚与人类审核
+                          汇聚与分项 Gate 审核
                                   ↓
                         最终检查与交付 main
 ```
@@ -304,7 +304,7 @@ main 上仅运行档案变化不使输入失效；交付比较排除 runs 目录
 
 采用**WebUI + 后台 Runtime**，本地或 Linux 无头服务器均可运行。关闭浏览器或 SSH 连接后，Workflow 仍可继续执行。
 
-- **WebUI**：Source Facet / Facet Node 编辑器、Combination Facet 与 Combination Node DAG 预览、Git Diff、日志、Gate 人类审核、运行精炼、运行监控。
+- **WebUI**：Source Facet / Facet Node 编辑器、Combination Facet 与 Combination Node DAG 预览、Git Diff、日志、Gate 分项审核与人工接管、运行精炼、运行监控。
 - **Workflow Runtime**：读取 Combination Node DAG，判断就绪节点，启动和监督 Combination Worker，处理依赖、有限并行、失败恢复与 Gate 流转，**不另设 AI 智能调度器**。
 - **Combination Worker / Agent Adapter**：由 Runtime 启动，调用 Codex 等 Agent 或命令行工具，负责一个 Combination Node 的实际生命周期。
 - **Git Manager / Podman Manager**：提供经过权限控制的宿主机操作。
@@ -358,7 +358,7 @@ Runtime 持久化本地就绪队列、活动 Attempt、Worker/容器引用、重
 
 1. 定义两个 Source Facet，分别含少量只提供上下文的 Facet Node DAG。
 2. 固定生成一个 Combination Facet 及其 Combination Node DAG；Runtime 按 DAG 找到就绪节点并允许无依赖分支并行。
-3. 实现 Combination Worker 的 `Pre-Assess → Agent Execution → 本地 Checkpoint → 人类 Gate`。
+3. 实现 Combination Worker 的 `Pre-Assess → Agent Execution → 本地 Checkpoint → 各 Node 的 Gate 全部批准`。
 4. Gate 可定向返回上游 Combination Node；修复后重新执行受影响的下游节点。
 5. 每个 Requirement 独立 Worktree 和 Rootless Podman；Runtime 持久化本地运行状态，精简决策和结果档案发布到 main。
 6. Workflow 完成后运行集成验证，经人类确认提交单个集成 Commit 到 main。

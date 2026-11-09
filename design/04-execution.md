@@ -9,7 +9,7 @@ sequenceDiagram
     participant RT as Runtime
     participant GM as Git Manager
     participant W as Worker
-    participant H as Human Gate
+    participant G as 各 Node 的 Gate
     RT->>GM: 汇聚前驱输入，创建 Context Snapshot
     RT->>RT: 原子持久化 Attempt=pending 与节点状态
     RT->>W: 启动独立 detached Worktree 和容器
@@ -20,10 +20,11 @@ sequenceDiagram
     W->>RT: Post-Assess、结果与证据
     RT->>RT: 持久化 waiting_gate
     RT->>GM: 保存持久证据并发布精简档案到 main
-    GM-->>H: 固定上下文、代码与证据
-    H->>GM: 决策与预期 Attempt 摘要
-    GM->>GM: 校验并提交 Decision 和关联状态到 main
-    GM-->>RT: 发布成功，按决策推进后继
+    GM-->>RT: waiting_gate 材料发布成功
+    RT->>G: 并行评估固定上下文、代码与证据
+    G-->>RT: 分项报告 / 决策
+    RT->>GM: 串行校验并提交分项结果及关联状态
+    GM-->>RT: 全部批准发布成功后解锁后继
 ```
 
 main 暂不可写时，本地保存待发布操作。发布 waiting_gate 前不展示为可正式审核；决策发布前不解锁后继。创建 Worker 无需逐状态提交 Git，但必须有可恢复的本地记录。
@@ -52,7 +53,39 @@ context:
     - .facetloom/facets/layer/facet.yaml
   constraints: [不依赖具体基础设施实现]
   reference_paths: [docs/authentication.md]
-gate_policy_digest: sha256:<digest>
+gates:
+  - gate_id: feature/login
+    policy:
+      mode: human
+      evaluator: null
+      context:
+        objectives: []
+        constraints: []
+        reference_paths: []
+      source_paths: [.facetloom/workflows/development.yaml, .facetloom/facets/feature/facet.yaml]
+    policy_digest: sha256:<feature-gate-policy-digest>
+  - gate_id: layer/domain
+    policy:
+      mode: ai
+      evaluator:
+        schema_version: 1
+        id: domain-reviewer
+        kind: ai
+        adapter: codex
+        model: <model-id>
+        parameters: {}
+        instruction: 根据审核要求检查固定输出，逐项引用证据，无法判断时说明缺失信息。
+        timeout_seconds: 300
+        execution:
+          environment_ref: <immutable-environment-ref>
+          tools: [read, test]
+          network: disabled
+      context:
+        objectives: [审核领域模型及业务边界]
+        constraints: []
+        reference_paths: [.facetloom/references/domain-review.md]
+      source_paths: [.facetloom/workflows/development.yaml, .facetloom/facets/layer/facet.yaml, .facetloom/evaluators/domain-reviewer.yaml]
+    policy_digest: sha256:<domain-gate-policy-digest>
 execution:
   adapter: codex
   environment_digest: sha256:<digest>
@@ -68,6 +101,11 @@ execution:
 | 前驱输入 | direct_predecessors 各项固定 combination_id、attempt_id、output_commit |
 | 执行环境 | 固定 Adapter、工具、有效路径、网络和环境摘要；凭据只记录类别与用途 |
 | 修复要求 | 有修复请求时记录指令与原决策的不可变引用；失败代码不会自动成为新输入 |
+| Gate 策略 | gates 按 Facet 声明顺序列出每个选中 Node 的 gate_id、完整有效 policy 与 policy_digest；缺项、重复项或来源不匹配时拒绝启动 |
+
+`policy.context.objectives` 按 Workflow → Node 顺序累积目标，其他约束和资料同样累积并保留来源；任务上下文仍作为共同审核输入。`policy.evaluator` 保存完整有效配置，不能只有 ID 或摘要。仓库来源由 source_commit 固定；本地配置来源在 policy 中另记 `evaluator_source: runtime:<id>`，其值已内联，不依赖日后读取本地文件。
+
+`policy_digest` 对 policy 按 RFC 8785（JCS）规范化后的 UTF-8 JSON 字节求 SHA-256；仅允许该规范支持的 JSON 值。Decision / GateReport 的 gate_policy_digest 必须等于对应项摘要。Snapshot 文件名仍对完整 YAML 文件字节求摘要。策略或有效评估器配置变化需要新 Snapshot 与新 Attempt；改变 Workflow / Node 定义则需要新 Run。
 
 根节点以 source_commit 为代码基线。单前驱可复用其有效输出 Commit；多前驱按 Combination ID 排序、去重输出 Commit 后合并，记录有序父提交列表。相同输入集合使用相同合并策略与工具版本生成相同 Tree；时间等元数据不要求产生相同 Commit OID。
 
@@ -151,11 +189,11 @@ related_refs:
 
 run_record 的路径相对对应运行目录，不得越出目录。Context Snapshot、Decision、Checkpoint 和 Report 引用的目标必须同 Commit 发布或已存在且内容匹配。清理时保留有效引用目标；仅当引用来源可更新时，才可先转换成删除前 Commit 的 git_file。不可变来源保留时，其依赖也保留。可变 Attempt 用稳定 ID 关联，审核并发控制另用其文件摘要。
 
-output_refs 在 waiting_gate 前可为空；waiting_gate 必须有且仅有一个 role: code 引用。outcome 为 changed、no_change 或 not_applicable；不适用结论须有可核对的理由，且经过人类 Gate。拒绝、失败或取消的输出不能满足后继。
+output_refs 在 waiting_gate 前可为空；waiting_gate 必须有且仅有一个 role: code 引用。outcome 为 changed、no_change 或 not_applicable；不适用结论须有可核对的理由，且经过该 Attempt 的全部 Gate。拒绝、失败或取消的输出不能满足后继。
 
 ## 输入比较与集成交付
 
-定义 `project_tree(commit)`：保留该 Commit 的所有被 Git 跟踪的路径、内容和模式，仅移除 `.facetloom/runs/` 子树以及移除后为空的目录。定义、资料和代码均在比较范围内。运行档案不作为执行上下文，也不通过容器挂载暴露为项目输入。
+定义 `project_tree(commit)`：保留该 Commit 的所有被 Git 跟踪的路径、内容和模式，仅移除 `.facetloom/runs/` 子树以及移除后为空的目录。定义、资料和代码均在比较范围内。运行档案不作为项目定义或代码输入；只向执行者和审核者提供明确引用的前驱结果、修复决策或评估证据，不挂载整个档案目录。
 
 ```text
 最新 main：正式输入 + 各 Run 档案
@@ -183,7 +221,7 @@ output_refs 在 waiting_gate 前可为空；waiting_gate 必须有且仅有一�
 
 | 字段 | 定义 |
 | --- | --- |
-| schema_version、report_id、run_id | 格式为 1，Report UUIDv4，所属 Run |
+| schema_version、report_type、report_id、run_id | 格式为 1，report_type 为 integration，Report UUIDv4，所属 Run |
 | source_commit | 固定运行输入 |
 | target_branch、target_head_before | main 与检查时读取的 main 头 |
 | candidate_tree | 被检查的候选 project_tree |
@@ -194,6 +232,7 @@ output_refs 在 waiting_gate 前可为空；waiting_gate 必须有且仅有一�
 
 ```yaml
 schema_version: 1
+report_type: integration
 report_id: <uuid>
 run_id: <run-id>
 source_commit: <full-commit-oid>
