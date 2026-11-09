@@ -20,6 +20,7 @@ exclude:
   - feature: [notification]
     layer: [application]
 execution:
+  runner: developer
   checks:
     - id: unit
       argv: [pytest, -q, test/auth]
@@ -79,7 +80,21 @@ nodes:
         objective: 检查剩余时间和恢复提示是否符合需求
 ```
 
-`domain-reviewer`、`ui-reviewer` 使用 kind=ai 的配置；`dependency-check` 使用脚本配置：
+执行 runner `developer` 与审核 runner `reviewer` 都固定到预装 Agent 和项目环境的镜像 digest，原生参数配置非交互调用。参数与 runner 文件格式见 [Workflow](01-workflow.md)，示例占位参数必须替换为所用 Agent 版本的真实参数。
+
+`domain-reviewer`、`ui-reviewer` 使用独立审核会话，例如：
+
+```yaml
+# .facetloom/evaluators/domain-reviewer.yaml
+schema_version: 1
+id: domain-reviewer
+kind: ai
+runner: reviewer
+instruction: 检查锁定、到期恢复与领域隔离，引用证据并返回结构化结论。
+timeout_seconds: 300
+```
+
+`ui-reviewer` 使用相同结构并填写界面审核指令；`dependency-check` 使用脚本配置：
 
 ```yaml
 # .facetloom/evaluators/dependency-check.yaml
@@ -90,7 +105,6 @@ argv: [python3, tools/check_dependencies.py]
 timeout_seconds: 120
 execution:
   environment_ref: <immutable-environment-ref>
-  tools: []
   network: disabled
 ```
 
@@ -105,11 +119,11 @@ execution:
 
 ## 从运行到交付
 
-1. 人类审阅并在 main 发布 Requirement r1、current、Workflow、Facet 和审核评估器定义。
+1. 人类审阅并在 main 发布 Requirement r1、current、Workflow、Facet、runner、原生配置和审核评估器定义，准备好固定 digest 的镜像与本地凭据。
 2. Runtime 固定 source_commit，生成 DAG，先本地持久化，再发布初始精简档案。代码仍未变。
-3. Runtime 先创建 preparing Attempt，再固定代码输入与 Context Snapshot 转 pending。Adapter 保存实际初始请求和 agent_input_ref，再启动 Worker 并发送原请求。准备失败直接保存 ErrorRecord，不伪造输入。
-4. 执行 Workflow 与 Node 累积的必要检查，失败时同一 Worker 最多修复并全量重检 2 次；最终 Tree 对应的完整结论形成后生成 Checkpoint 与 Post-Assess；将最终检查与轮次保存为 CheckReport，验证初始请求、bundle 和执行证据持久可读，固定 review_input_digest，进入 waiting_gate 并发布 main。
-5. Runtime 并行调度各项 Gate，调用前保存实际评估请求，报告通过 request_input_ref 引用。各项报告只作为审核输出发布，不改写执行证据；全部批准和关联状态发布成功后，后继才可执行。
+3. Runtime 先创建 preparing Attempt，再固定代码输入与 Context Snapshot 转 pending。Adapter 预检容器内外部 Agent，保存实际初始请求和 agent_input_ref，再启动原生调用；版本、argv 与 session_id 保存在 Invocation 中。准备失败直接保存 ErrorRecord，不伪造输入。
+4. 外部 Agent 完成任务后，Runtime 执行 Workflow 与 Node 累积的必要检查；失败时 Adapter 续接原生会话，同一 Worker 最多修复并全量重检 2 次；最终 Tree 对应的完整结论形成后生成 Checkpoint 与 Post-Assess；将最终检查与轮次保存为 CheckReport，验证初始请求、bundle 和执行证据持久可读，固定 review_input_digest，进入 waiting_gate 并发布 main。
+5. Runtime 并行调度各项 Gate，AI 项使用独立外部 Agent 会话，脚本项直接运行程序；调用前保存实际评估请求，报告通过 request_input_ref 引用。各项报告只作为审核输出发布，不改写执行证据；全部批准和关联状态发布成功后，后继才可执行。
 6. application 与 data 并行，presentation 按稳定顺序三方汇聚，Agent 解决范围内冲突。若成果 Gate 发现缺少锁定到期恢复行为而拒绝，Attempt rejected，节点转错误处置。人类在错误 Gate 选择 repair_upstream，目标为 domain；决定发布后 domain 及其后继 stale，再按依赖重新执行。
 7. 所有节点 satisfied，Run completed。summary 记录结果、返工原因和待改进问题；完成不等于已经交付。
 8. 另一个 clone 此时发布自己的 Run 档案。main 头变化，但 project_tree 不变，当前运行仍可交付。
@@ -154,6 +168,7 @@ main
 本地 .runtime/
 ├── 活动状态、待发布操作和 detached Worktree
 ├── transactions/<operation-id>/ / locks/
+├── workers/<attempt-id>.yaml / invocations/<invocation-id>.yaml
 ├── 完整日志
 └── refinements/<id>/
 
@@ -176,9 +191,18 @@ main
 | Node 未声明 Gate / 仅声明部分字段 | 继承 Workflow 默认，mode 缺省 human；审核上下文累积且可追溯 |
 | human / ai_assisted / ai / script | 分别由人类、人类、AI、程序决策；AI 建议本身不算批准 |
 | 自动模式缺少或错配评估器 | 校验失败，不使用本地替代定义 |
-| clone 无法满足固定模型、工具或环境 | 执行错误进入错误 Gate；评估器故障人工接管，不静默切换 |
+| clone 无法满足固定 runner、原生配置或环境 | 执行错误进入错误 Gate；评估器故障人工接管，不静默切换 |
 | 必要测试未结束或引用未持久化 | 不进入成果审核；失败保存实际错误，发布不可用时保留本地操作 |
 | 实际初始请求留存 | 发送前本地保存；通过持久引用读取并校验字节摘要 |
+| runner 或原生配置引用缺失 | 创建 Run 前拒绝，不使用宿主机 Agent 配置兜底 |
+| 镜像/Agent 缺失、参数不支持或认证失败 | 保存实际错误，执行转错误 Gate；审核为评估故障 |
+| 关闭原生审批及内部沙箱 | 容器隔离、Scope、Runtime 检查与 Gate 继续生效 |
+| 检查修复与原生续接不支持 | 前者串行记录每次输入；后者进入错误 Gate，不自建 Agent 循环 |
+| 原生成功退出但审核结果无效 | 评估故障，不能当作批准或拒绝 |
+| 总时限耗尽、Runtime 重启 | 原 deadline 不重置，停止执行并保存 execution_timeout |
+| PID 复用、容器状态查询失败或停止超时 | 按容器与进程启动身份对账；unknown 不当作退出，不重复启动 |
+| r2 已发布、r1 未结束 | 停止旧执行；允许取消与历史归档，禁止恢复或交付 |
+| 取消时 advance 未发送 / 推送在途 | 分别撤销 / 先对账；保留历史终态，迟到批准不解锁后继 |
 | 评估请求未形成就失败 | error 报告允许 request_input_ref 为 null，说明原因 |
 | 修改冻结字段或替换引用内容 | 审核输入/内容摘要校验失败，不能发布决策 |
 | 仅更新分项报告、决策或状态 | review_input_digest 不变，其他独立审核仍有效 |
@@ -197,7 +221,7 @@ main
 | bundle 在另一 clone 导入 | 可恢复被引用的输入与输出对象 |
 | 部分采纳、验证失败、来源变化 | 保留待处理记录，必要时重新确认 |
 | 精炼清理或回退 | 历史可追溯，回退恢复记录，无悬空有效引用 |
-| Worker 尝试写 main 或人类决策 | 固定工具与凭据边界拒绝 |
+| Worker 尝试写 main 或人类决策 | 容器挂载与凭据边界拒绝 |
 | 相同 Commit、多前驱祖先关系、输入顺序变化 | 去重及祖先消除，来源保留；稳定顺序得到相同候选 Tree |
 | 部分前驱共享历史并撤销改动 | 每步使用真实共同祖先，不重复应用或复活已撤销修改 |
 | 多个最佳共同祖先 | 固定 Git 的标准虚拟基线处理，不任意选择 |

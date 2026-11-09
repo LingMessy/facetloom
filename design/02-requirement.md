@@ -72,7 +72,7 @@ flowchart LR
     R2 -->|同步 clone| C[取消旧版本未终态运行]
 ```
 
-只有主分支 `current.yaml` 指向的版本可启动新 WorkflowRun 或发布、集成成果。WorkflowRun 启动时固定包含该版本的 `source_commit`。其他 clone 同步到新指针后，停止并取消旧版本的未终态运行；已接受成果保留为历史，不得进入新版本。发布或集成前刷新 main 并再次校验指针。仅运行档案变化不使成果失效；其余输入变化则需新 Run。不同运行的档案使用各自 run_id 目录。
+只有主分支 `current.yaml` 指向的版本可启动新 WorkflowRun、推进有效成果或集成交付。旧版本仍可发布取消、失败及历史证据档案，不能借归档恢复执行或接受新成果。WorkflowRun 启动时固定包含该版本的 `source_commit`。其他 clone 同步到新指针后，停止并取消旧版本的未终态运行；已接受成果保留为历史，不得进入新版本。生效发布或集成前刷新 main 并再次校验指针；取消与历史归档按 Services 的发布分类处理。仅运行档案变化不使成果失效；其余输入变化则需新 Run。不同运行的档案使用各自 run_id 目录。
 
 ## WorkflowRun
 
@@ -97,6 +97,7 @@ WorkflowRun 的必需字段如下：
 | `owner_runtime_id` | 是 | 创建运行的 clone-local Runtime UUIDv4；标识本 Run 唯一调度和记录写入者。 |
 | `status` | 是 | WorkflowRun 当前状态。 |
 | `error_gate` | 是 | 完整有效错误策略及 `policy_digest`，含模式、完整 evaluator、审核上下文、来源路径和自动恢复上限；启动时固定。 |
+| `runners` | 是 | runner_id → `{profile, source_refs, profile_digest}` 的不可变映射，覆盖执行及 AI 评估所需调用配置。 |
 | `merge_engine` | 是 | Runtime 在创建 Run 时固定的 Git 版本、不可变环境引用及有效合并参数；结构见 Execution，Run 内不可切换。 |
 | `auto_recoveries_used` | 是 | 已安排的自动恢复动作次数，初始 0；与动作意图在同一事务递增，重启不重置。 |
 | `status_reason` | 条件 | `blocked` 或 `cancelled` 时的原因；结构见本节。 |
@@ -106,11 +107,11 @@ WorkflowRun 的必需字段如下：
 启动流程：
 
 1. 获取 main 最新头，固定完整 OID 为 `source_commit`。
-2. 校验 current 指针、Requirement、Workflow、Facet、必要检查、成果及错误 Gate 策略、评估器配置和引用资料；拒绝引用运行档案作为定义或资料输入。
+2. 校验 current 指针、Requirement、Workflow、Facet、必要检查、执行与评估的 runner、成果及错误 Gate 策略、评估器配置和引用资料；拒绝引用运行档案作为定义或资料输入。
 3. 生成并校验 DAG，将 run.yaml、dag.yaml 和初始状态原子持久化到本地，再发布初始精简档案到 main。
 4. 再次同步检查 current 指针。需求已过期则取消；否则调度节点。仅运行档案的提交不影响固定输入。
 
-输入、`error_gate`、`merge_engine` 和 `owner_runtime_id` 创建后不变；状态、原因与更新时间可推进。main 的记录提交不能修改 `source_commit`。交付基线规则见 [Execution](04-execution.md)。
+输入、`runners`、`error_gate`、`merge_engine` 和 `owner_runtime_id` 创建后不变；状态、原因与更新时间可推进。main 的记录提交不能修改 `source_commit`。交付基线规则见 [Execution](04-execution.md)。
 
 | 状态 | 定义 |
 | --- | --- |
@@ -119,6 +120,8 @@ WorkflowRun 的必需字段如下：
 | `blocked` | 没有任何 Combination 可由 Runtime 或活动 Worker 继续推进，至少一项等待人工或外部条件；条件满足后可恢复。 |
 | `completed` | 所有业务 CombinationRun 均为 `satisfied`；最终交付可以仍待处理。 |
 | `cancelled` | 已停止调度；活动 Attempt 已取消或停止请求已持久化。 |
+
+cancelled 表示停止调度；Worker 是否实际退出单独展示，在途发布按 [Services](05-services.md) 对账后确定 Attempt 历史终态。
 
 `completed` 和 `cancelled` 为终态；需要改变已完成运行的输入或成果时创建新 WorkflowRun。旧版本运行的取消规则见 `current.yaml`，状态转换如下。
 
@@ -137,7 +140,7 @@ stateDiagram-v2
     cancelled --> [*]
 ```
 
-本地记录保存实时状态，main 显示最近已发布状态。Worker 的开始与结束在本地持久化后再推进；等待 Gate、Gate 决策、失败、取消、运行完成与交付是档案发布节点。未发布操作重启后重放，不能因 Git 推送失败而丢失。全部 Gate 批准须发布成功后才满足后继依赖。
+本地记录保存实时状态，main 显示最近已发布状态。待发布决定不算已生效；Run / 节点状态的生效视图与本地 outbox 分开保存，防止未推送的批准解锁后继。Worker 的开始与结束在本地持久化后再推进；等待 Gate、Gate 决策、失败、取消、运行完成与交付是档案发布节点。未发布操作重启后重放，不能因 Git 推送失败而丢失。全部 Gate 批准须发布成功后才满足后继依赖。
 
 ## 运行档案
 
@@ -193,6 +196,24 @@ merge_engine:
   environment_digest: sha256:<digest>
   strategy: ort
   options: {conflict_style: merge, renames: true, rename_threshold: 50, rename_limit: 0, diff_algorithm: histogram}
+runners:
+  developer:
+    profile:
+      schema_version: 1
+      id: developer
+      adapter: claude_code
+      image_ref: registry.example.com/project-agent@sha256:<image-digest>
+      args: ["<native-non-interactive-arg>", "<native-bypass-approvals-arg>"]
+      config_refs: []
+      timeout_seconds: 1800
+      network: outbound
+    source_refs:
+      - type: git_file
+        commit: <source-commit-oid>
+        path: .facetloom/runners/developer.yaml
+        blob_oid: <blob-oid>
+        digest: sha256:<file-digest>
+    profile_digest: sha256:<runner-profile-digest>
 auto_recoveries_used: 0
 created_at: "2026-11-04T12:00:00Z"
 updated_at: "2026-11-04T12:00:00Z"
@@ -275,7 +296,7 @@ updated_at: "2026-11-09T12:00:00Z"
 | 错误 Gate 选择 repair_upstream 并发布 | 停止失效范围内活动 Attempt | 目标与全部后继 stale，按依赖重新执行 |
 | 错误 Gate 选择 wait / 自身故障或额度耗尽 | 旧终态不变 | blocked，保留错误引用与原因 |
 | 输入失效 | 活动 Attempt cancelled；终态保持 | stale，清空 accepted_attempt_id |
-| Run 取消 | 活动 Attempt cancelled；终态保持 | 未满足节点 cancelled；撤销活动评估 |
+| Run 取消 | 活动 Attempt cancelled；在途终态发布先对账，既有终态保持 | 未满足节点 cancelled；撤销活动评估 |
 
 只有 satisfied 满足后继依赖。恢复决定获准不等于接受成果；发布成功之前不能执行恢复动作。Run 还有可执行分支、活动 Worker 或自动错误处置时保持 running；没有可继续推进的工作且存在人工或外部等待时为 blocked。
 
@@ -318,7 +339,7 @@ code 为机器可读字符串，message 非空，related_refs 使用 Execution �
 
 ## Attempt
 
-Attempt 是一个 Combination 的一次尝试，涵盖准备、执行与成果审核。attempt_id 为全局唯一 UUIDv4，attempt_number 在 CombinationRun 内从 1 递增；最多启动一个 Worker。该 Worker 可以在检查预算内多次修复代码，不另建 Attempt。
+Attempt 是一个 Combination 的一次尝试，涵盖准备、执行与成果审核。attempt_id 为全局唯一 UUIDv4，attempt_number 在 CombinationRun 内从 1 递增；最多创建一个 Worker。Worker 是 Runtime 管理的容器、Worktree 和调用记录，可在检查预算内通过 Adapter 续接外部 Agent 多次修复，不另建 Attempt；一次 Worker 不等于一次进程调用。
 
 ```mermaid
 stateDiagram-v2
@@ -392,7 +413,7 @@ updated_at: "2026-11-09T12:00:00Z"
 
 进入成果 waiting_gate 时 outcome、summary、output_refs、review_input_digest 一并冻结；其引用内容不得追加或替换。审核映射键必须来自 Snapshot 的成果 Gate 列表，目标须匹配同一 Attempt、策略、摘要与输出 Tree。审核期间仅推进状态、时间、状态原因与成果报告/决定引用。
 
-worker_ref 属于本地状态，不写入 Git。新 Attempt 最多启动一个 Worker，无法对账的旧 Worker 先隔离或停止，再按错误决定恢复。
+worker_ref 属于本地状态，不写入 Git。新 Attempt 最多创建一个 Worker，无法对账的旧 Worker 先确认停止或隔离，再按错误决定恢复；停止意图、原生会话与进程对账见 Services。
 
 ## 持久化与恢复
 

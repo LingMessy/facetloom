@@ -17,9 +17,11 @@ sequenceDiagram
     RT->>RT: 保存 Adapter 组装的初始请求与 agent_input_ref
     RT->>W: 启动独立 detached Worktree 和容器，提交已保存请求
     RT->>RT: 持久化 Attempt=running
-    W->>W: Pre-Assess、执行、必要检查及预算内修复重检
-    W->>GM: 请求 Checkpoint
-    GM-->>W: 本地输出 Commit
+    W->>W: 外部 Agent Pre-Assess 与执行
+    W-->>RT: 待检查候选
+    RT->>RT: 独立必要检查；失败经 Adapter 续接修复并重检
+    RT->>GM: 请求 Checkpoint
+    GM-->>RT: 本地输出 Commit
     W->>RT: Post-Assess、结果与证据
     RT->>GM: 完成证据与初始请求的持久化、引用校验
     RT->>RT: 固定审核输入与 review_input_digest，持久化 waiting_gate
@@ -75,15 +77,10 @@ gates:
         schema_version: 1
         id: domain-reviewer
         kind: ai
-        adapter: codex
-        model: <model-id>
-        parameters: {}
-        instruction: 根据审核要求检查固定输出，逐项引用证据，无法判断时说明缺失信息。
+        runner: reviewer
+        runner_profile_digest: sha256:<reviewer-runner-digest>
+        instruction: 根据审核要求检查固定输出，逐项引用证据，返回结构化结论。
         timeout_seconds: 300
-        execution:
-          environment_ref: <immutable-environment-ref>
-          tools: [read, test]
-          network: disabled
       context:
         objectives: [审核领域模型及业务边界]
         constraints: []
@@ -91,9 +88,12 @@ gates:
       source_paths: [.facetloom/workflows/development.yaml, .facetloom/facets/layer/facet.yaml, .facetloom/evaluators/domain-reviewer.yaml]
     policy_digest: sha256:<domain-gate-policy-digest>
 execution:
-  adapter: codex
-  environment_digest: sha256:<digest>
-  tools: [test]
+  runner_id: developer
+  runner_profile_digest: sha256:<developer-runner-digest>
+  resources: {cpus: 2, memory_mb: 4096}
+  check_environment:
+    image_ref: registry.example.com/project-agent@sha256:<image-digest>
+    network: disabled
   read_paths: ["**"]
   write_scope:
     all_of:
@@ -109,7 +109,6 @@ execution:
       timeout_seconds: 900
       source_path: .facetloom/workflows/development.yaml
   max_check_retries: 2
-  network: disabled
 ```
 
 | 内容 | 规则 |
@@ -117,7 +116,7 @@ execution:
 | 来源文件 | source_paths 和 reference_paths 均相对仓库根，由 source_commit 固定；不含运行档案 |
 | Node 与 Scope | 按 DAG members 解析；write_scope.all_of 保留每组路径与来源，禁止把交集压平成路径并集 |
 | 前驱输入 | direct_predecessors 各项固定 combination_id、attempt_id、output_commit |
-| 执行环境 | 固定 Adapter、工具、独立的读写范围、检查列表及预算、网络和环境摘要；凭据只记录类别与用途 |
+| 执行环境 | 引用 Run.runners 中的固定调用配置及摘要，记录独立读写范围、资源限制、检查环境、检查列表与预算；凭据只记录用途 |
 | 修复要求 | 记录错误处置授权的修复/补测指令及原错误、报告和决定引用；失败代码不自动成为新输入 |
 | Gate 策略 | gates 按 Facet 声明顺序列出每个选中 Node 的 gate_id、完整有效 policy 与 policy_digest；缺项、重复项或来源不匹配时拒绝启动 |
 
@@ -125,7 +124,9 @@ execution:
 
 例如上面的范围只允许 `src/auth/**` 和 `test/auth/**`；不能因另一组包含 `src/**` 而放宽到整个 src。Snapshot 保存匹配规则，执行时对实际路径判断，无需枚举未来可能创建的文件。
 
-`policy.context.objectives` 按 Workflow → Node 顺序累积目标，其他约束和资料同样累积并保留来源；任务上下文仍作为共同审核输入。`policy.evaluator` 保存完整有效配置，不能只有 ID 或摘要。审核指令、模型、参数、脚本及环境定义统一来自 source_commit；本地只提供凭据、连接和资源上限，无法满足固定执行配置时进入错误 Gate；评估器自身故障则人工接管。
+`policy.context.objectives` 按 Workflow → Node 顺序累积目标，其他约束和资料保留来源。policy.evaluator 保存完整有效审核定义，AI 项再带 runner_profile_digest；执行 runner 和 AI 审核 runner 的摘要都必须与所属 Run.runners 一致。解析时校验 Run、profile 及固定 Git 来源；保存 Snapshot / Attempt 时必须保留所属 Run 和 DAG，不允许清理其固定配置来源。
+
+runner 包含镜像、原生参数与配置，FacetLoom 不重建外部 Agent 的模型或工具系统。本地仅提供凭据、连接和资源上限；无法满足执行配置进入错误 Gate，评估器故障人工接管。check_environment 与 Agent 调用分开，默认使用执行 runner 的镜像并禁网；需要网络等额外检查环境时必须显式固定在 Workflow.execution.check_environment，不根据 Agent 的联网配置自动放宽检查。
 
 `policy_digest` 对 policy 按 RFC 8785（JCS）规范化后的 UTF-8 JSON 字节求 SHA-256；仅允许该规范支持的 JSON 值。Decision / GateReport 的 gate_policy_digest 必须等于对应项摘要。Snapshot 文件名仍对完整 YAML 文件字节求摘要。任务输入变化需要新 Snapshot 与新 Attempt；Workflow、Node 或评估器定义变化需要新 Run。
 
@@ -177,7 +178,7 @@ conflicts: []                 # 各步冲突并集，不自动标记已解决
 
 ## 必要检查与同次修复
 
-Runtime 从 Workflow 和选中 Node 累积必要检查，将限定 ID、argv、超时、来源、环境和 max_check_retries 固定到 Snapshot。检查由 Runtime 调度并记录真实退出结果，Worker 自报通过不能替代检查记录。命令配置来自 source_commit；受信检查入口脚本从该 Commit 提供，不能被候选代码替换。被检查的实现和测试内容来自本轮候选 Tree。
+Runtime 从 Workflow 和选中 Node 累积必要检查，将限定 ID、argv、超时、来源、环境和 max_check_retries 固定到 Snapshot。检查程序由 Runtime 在独立候选副本中运行，不依赖外部 Agent 自己执行或汇报。检查由 Runtime 调度并记录真实退出结果，Worker 自报通过不能替代检查记录。命令配置来自 source_commit；受信检查入口脚本从该 Commit 提供，不能被候选代码替换。被检查的实现和测试内容来自本轮候选 Tree。
 
 ```text
 Agent 执行 / 解决冲突
@@ -193,7 +194,7 @@ Agent 执行 / 解决冲突
 - 每轮按有效列表顺序执行全部检查，不因测试失败跳过其余项；命令无法启动等执行错误可中止该轮，其余项记 not_run。每项记录 check_id、round（从 1 开始）、evaluated_tree、passed / failed、退出码或 timeout、证据引用及使用环境。
 - 检查在该候选 Tree 的隔离副本运行，可写临时产物；不能把测试生成或修改的受跟踪文件带回成果。任何 Agent 代码修改都会使已有检查结果对新 Tree 失效，需要全量重检。
 - 已启动命令的非零退出或超时属于 failed 证据。命令无法启动、环境不可用或结果证据丢失属于执行错误，不用虚假 failed 结果补齐列表。
-- 修复轮次用尽后只允许对最终已检查 Tree 生成正式 Checkpoint；代码再变化必须新 Attempt。零项检查记录空清单，不能虚称有测试通过。
+- 检查失败通过 Adapter 续接原生会话反馈，外部 Agent 自行修复；无法安全续接则报错转错误 Gate，不在 Runtime 内实现模型/工具循环。修复轮次用尽后只允许对最终已检查 Tree 生成正式 Checkpoint；代码再变化必须新 Attempt。零项检查记录空清单，不能虚称有测试通过。
 - 每轮日志保存在 Artifact；精简档案保留最终 Tree、有效检查结论、修复次数及各轮证据引用。最终 Checkpoint Tree 必须等于最后一轮 evaluated_tree。
 
 检查修复预算只约束当前 Worker；错误 Gate 创建新 Attempt 或安排上游修复使用独立的 Run 级自动恢复额度。最终 integration.checks 仍须全部通过才可交付。
@@ -245,7 +246,7 @@ created_at: "2026-11-09T12:00:00Z"
 
 ## 实际初始输入
 
-Context Snapshot 是有效输入清单；Adapter 实际提交的初始消息、工具声明及附件清单作为 Artifact 留存。附件内容内联或使用可恢复的不可变引用，不能只记录临时路径。动态工具结果与后续对话按日志规则保存，不要求写入初始输入 Artifact。
+Context Snapshot 是有效输入清单；Adapter 实际交给外部 Agent 的初始任务、启动参数、工作目录、配置摘要及附件清单作为 Artifact 留存；工具声明仅在调用协议实际提供时记录。附件内容内联或使用可恢复的不可变引用，不能只记录临时路径。动态工具结果与后续对话按日志规则保存，不要求写入初始输入 Artifact。
 
 | 引用 | 所属记录 | 保存时机 |
 | --- | --- | --- |
@@ -260,9 +261,13 @@ agent_input_ref:
   media_type: application/json
 ```
 
-Adapter 先组装并本地原子保存请求，再发送同一内容，不能事后根据定义重新生成来代替原请求。引用在请求形成时分配不可变 URI 与摘要，本地待上传状态单独记录；上传使用同一内容和引用，不改写 Attempt 输入。传输结果未知时按本地调用记录对账，不能声称请求一定送达或自动重复发送。
+Adapter 先组装并本地原子保存外部调用输入，再传入同一内容，不能事后根据定义重新生成来代替原请求。引用在请求形成时分配不可变 URI 与摘要，本地待上传状态单独记录；上传使用同一内容和引用，不改写 Attempt 输入。传输结果未知时按本地调用记录对账，不能声称请求一定送达或自动重复发送。
 
-留存内容只覆盖 FacetLoom 可观测的实际请求；服务认证凭据由传输层注入，不进入消息或 Artifact。不记录服务商内部提示或模型内部状态，也不承诺相同输入产生相同输出。Gate 请求不包含自身 request_input_ref，避免摘要自引用。
+留存内容只覆盖 FacetLoom 交给外部 Agent 的输入；它不等于 Agent 发给模型服务的完整请求。凭据由运行环境或连接层注入，不进入留存内容。不记录无法观测的原生系统提示、模型内部状态或内部压缩结果；Agent 未报告的模型及工具版本记 null，不宣称已固定。Gate 请求不包含自身 request_input_ref，避免自引用。
+
+每次启动或续接都分配独立 invocation_id，先保存输入再调用。同次修复反馈携带实际检查结果与请求引用；不能用 agent_input_ref 代表后续全部对话。完整调用清单作为不可变 Artifact，至少记录 runner/profile 摘要、镜像 digest、Adapter 与程序版本、原生 session_id（可空）、各次输入引用、实际 argv（脱敏）、事件/结果日志和退出状态。
+
+成果冻结前将调用清单加入 output_refs 的 evidence；执行失败加入 ErrorRecord 证据；Gate 使用 GateReport.evidence_refs；Refinement 保存于本地会话及其提交依据。它们不记录原生隐藏推理，也不把原生 exit_code=0 当作检查或审核通过。调用清单不得引用包含它的对象，避免循环摘要。
 
 ## 固定审核输入
 

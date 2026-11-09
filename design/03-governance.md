@@ -13,7 +13,7 @@
 | GateDecision | 某项成果审核或错误处置决定 | main 的运行档案 decisions/ |
 | Refinement | 人机筛选记录、落实改进的会话 | 本地 `.runtime/refinements/` |
 | 改进 Commit | 已落实改动、验证结论、证据来源及清理范围 | main 的 Git 历史 |
-| 执行边界 | 文件、工具、网络、资源与凭据限制 | 本地 Runtime 配置和隔离环境 |
+| 执行边界 | 固定 runner、文件与网络隔离、资源和凭据限制 | Git 定义及 Run 快照；本地 Runtime 实施隔离 |
 
 普通定义修改由人类审阅 Diff 后提交 main；Requirement 内容变化须发布新版本并更新 current.yaml。Refinement 是根据运行记录主动改进的入口。所有 main 写入都遵守 Git 凭据与分支保护。
 
@@ -44,32 +44,30 @@ flowchart LR
 
 ## 评估器与执行边界
 
-`gate.evaluator` 只引用 source_commit 中的 `.facetloom/evaluators/<id>.yaml`；审核指令、模型、参数、脚本及环境定义统一进入 Git。引用不存在或类型不匹配时校验失败，没有本地定义回退。格式如下；尖括号值在实际配置中替换为具体值。
+`gate.evaluator` 只引用 source_commit 中的 `.facetloom/evaluators/<id>.yaml`；评估目标、指令和程序定义进入 Git，没有本地定义回退。AI 评估同样调用外部 Agent，使用 runner 选择镜像、原生参数及配置。
 
-```yaml
+~~~yaml
 schema_version: 1
 id: domain-reviewer
 kind: ai
-adapter: codex
-model: <model-id>
-parameters: {}
-instruction: 根据审核要求检查固定输出，逐项引用证据，无法判断时说明缺失信息。
+runner: reviewer
+instruction: 根据固定审核材料逐项引用证据，输出要求的结构化结论，无法判断时说明原因。
 timeout_seconds: 300
-execution:
-  environment_ref: <immutable-environment-ref>
-  tools: [read, test]
-  network: disabled
-```
+~~~
 
 | kind | 必填配置 |
 | --- | --- |
-| ai | adapter、非空 model、parameters 对象、非空 instruction |
-| script | 非空 argv 参数数组，例如 `[python3, tools/check_dependencies.py]` |
-| 两者共同 | schema_version=1、id、kind、正整数 timeout_seconds、execution |
+| ai | runner、非空 instruction；runner 必须存在于 source_commit |
+| script | 非空 argv 参数数组，以及 execution.environment_ref 与 execution.network |
+| 两者共同 | schema_version=1、id、kind、正整数 timeout_seconds |
 
-`id` 与文件名一致，格式同 Node ID。`execution` 固定可恢复的环境引用、工具列表和网络限制；`ai` 与 `ai_assisted` 要求 kind=ai，`script` 要求 kind=script。有效配置完整写入 Snapshot。
+id 与文件名一致，格式同 Node ID。ai 与 ai_assisted 要求 kind=ai，script 要求 kind=script。script 的 environment_ref 固定到不可变环境；network 为 disabled / outbound；不调用 Agent、不要求 runner。
 
-本地只提供凭据、服务连接和资源上限，不能替换模型、审核指令、脚本、环境或工具权限。连接须提供配置指定的服务能力；无法满足固定配置时阻塞并说明原因，不通过缩减工具或切换模型继续。凭据只记录类别与用途；更新 Git 中的审核定义后需新 Run。
+有效 AI policy.evaluator 保存完整评估定义及解析出的 runner_profile_digest，完整 runner 由 Run.runners 提供；审核 Snapshot 或错误策略同时绑定其摘要。模型与工具由外部 Agent 原生配置决定，评估器对象只保存调用引用和审核指令。
+
+本地仅注入凭据、连接和资源限制，不能替换 runner 或审核指令。无法满足固定调用配置时记录评估故障并允许人工接管。关闭外部 Agent 的原生审批不会批准 FacetLoom Gate；任何审核仍使用独立于执行 Worker 的新会话与隔离副本。
+
+AI 评估的时限取 evaluator.timeout_seconds 与 runner.timeout_seconds 的较小值，超时为评估故障；不消耗节点执行的修复轮次。实际模型、工具及 Agent 版本仅记录程序可观测信息，不能把缺失信息补成确定值。
 
 ```text
 Worker               → 生成代码与自检证据
@@ -92,7 +90,7 @@ Runtime / Git Manager → 校验主体与策略，保存决策，汇总并发布
 | review_input_digest | 必须匹配 Attempt 的固定审核输入摘要 |
 | request_input_ref | 实际初始评估请求的持久 Artifact 引用；仅请求尚未形成即失败时可为 null |
 | previous_decision_id | 发起评估时该 Gate 的前一决策，首次为 null |
-| evaluator | 评估器 ID、kind；实际解析的模型/工具版本等运行信息另记在此 |
+| evaluator | 评估器 ID、kind；实际外部 Agent 与 Adapter 版本、runner 摘要、原生会话及可观测模型/工具信息另记在此；未知项为 null |
 | status | completed 或 error |
 | result | completed 时为 Approved、Rejected、Escalated 或 Blocked；error 时为 null |
 | rationale、evidence_refs | 非空说明和证据引用列表；error 时说明故障 |
@@ -110,7 +108,9 @@ Runtime 在调用前分配 report_id，持久化本地任务与实际初始请�
 }
 ```
 
-AI Adapter 返回同样的结果结构。`rationale` 必须非空，证据沿用 [Execution](04-execution.md) 的类型化引用。脚本正常退出且返回有效结果才为 completed；退出非零、超时、无效输出或缺失证据引用为 error，不能把退出码直接当成拒绝。程序可以正常退出并返回 Rejected。
+外部 Agent 经 Adapter 返回同样的结果结构。原生成功退出但未返回完整有效结构时为 error，不由 Runtime 用另一模型补写决策。`rationale` 必须非空，证据沿用 [Execution](04-execution.md) 的类型化引用。脚本正常退出且返回有效结果才为 completed；退出非零、超时、无效输出或缺失证据引用为 error，不能把退出码直接当成拒绝。程序可以正常退出并返回 Rejected。
+
+AI 调用的初始请求与执行回执按 Execution 规则留存，实际后续输入和原生事件通过本项报告证据引用。
 
 `ai_assisted` 的报告只提供建议，不推进状态；人类 Decision 必须引用该报告，可以不同意建议并说明理由。`ai` / `script` 的 completed 报告由 Runtime 转成相同 result 的 Decision；错误报告没有决策主体，不伪造 AI / 程序决策。报告可随 Attempt 的 gate_report_refs 独立发布，使人工审核与故障处理有可共享的依据。
 
@@ -332,13 +332,19 @@ flowchart TD
 
 ### 会话与输入
 
-会话 ID 为 UUIDv4，状态保存于 `.facetloom/.runtime/refinements/<id>/session.yaml`，Diff、交互内容和验证输出位于同目录。会话状态为 `selecting → suggesting → reviewing → validating → completed`；验证失败返回 reviewing，取消为 cancelled。本地原子保存，浏览器断开不取消会话。
+会话 ID 为 UUIDv4，状态保存于 `.facetloom/.runtime/refinements/<id>/session.yaml`，Diff、交互内容和验证输出位于同目录。
+
+会话创建时固定最新 main 为 base_commit，从中选择 runner，并以与 Run.runners 相同的结构将完整 profile、摘要及来源保存到 session.yaml 的 runners 映射；runner_id 指定本会话使用项。不继承执行或评审会话。每次 AI 请求使用独立调用记录，实际时限取该 runner.timeout_seconds。
+
+会话状态为 `selecting → suggesting → reviewing → validating → completed`；验证失败返回 reviewing，取消为 cancelled。本地原子保存，浏览器断开不取消会话。以下示例省略 runners 映射内容，实际须完整保存。
 
 ```yaml
 schema_version: 1
 refinement_id: <uuid>
 status: reviewing
 base_commit: <main-commit>
+runner_id: developer
+runners: {}  # 此处省略；实际保存与 Run.runners 相同的完整映射
 items:
   - id: restore-on-expiry
     source_refs:

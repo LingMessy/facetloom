@@ -39,7 +39,7 @@ AI 的代码生成能力不断提高，但快速生成 Demo 并不等于长期�
 | **Facet Node（切面节点）** | Source Facet 中的上下文节点，提供范围、规则、输入和约束 | **否，绝不单独执行** |
 | **Combination Facet（组合切面）** | 由多个 Source Facet 按 Workflow 条件过滤后派生的执行切面；在 Workflow 版本内固定 | 否，承载执行图 |
 | **Combination Node（组合节点）** | 从每个 Source Facet 选择一个 Facet Node 形成的节点，属于 Combination Node DAG | **是，唯一的业务执行单元** |
-| **Combination Worker（组合执行器）** | Runtime 为 Combination Node 启动的进程或容器，负责一次实际执行 | 执行 Combination Node |
+| **Combination Worker（组合执行器）** | Runtime 为一个 Attempt 管理的隔离容器、Worktree 与调用生命周期 | 调用外部 Agent 执行 Combination Node |
 | **Gate（决策关卡）** | 针对组合执行成果的需求对齐、验收或授权 | 作为组合执行的一部分 |
 
 **Artifact** 不是独立版本化的核心实体，而是组合执行过程中产生和传递的文件、规范、代码、报告等中间成果，正式代码和精简证据索引由 Git 管理，大型内容保存在 Git 外的持久位置。
@@ -173,7 +173,7 @@ Workflow 版本只有在以下条件都满足时才能激活：
 
 ## 4. Combination Node 与 Combination Worker：真正的执行单元
 
-Combination Node 是静态的业务执行节点；Combination Worker 是 Runtime 为它启动的一次实际进程或容器。Worker 负责一个 Combination Node 的完整执行生命周期，Runtime 不直接执行 Agent、命令或代码修改。
+Combination Node 是静态的业务执行节点；Combination Worker 承载一次 Attempt 的容器、Worktree 与调用生命周期。每个 Attempt 最多有一个 Worker，由 Runtime 经 Adapter 调用容器内的外部 Agent；Runtime 独立执行检查，Git Manager 保存代码快照。FacetLoom 不实现 Agent 的模型推理、工具循环或上下文压缩。
 
 每个 Combination Worker 遵循统一的执行协议：
 
@@ -182,7 +182,7 @@ Combination Node 输入上下文
     ↓
 Pre-Assess：是否相关、是否需要修改、输入是否充分
     ↓
-Execution（可跳过）：Agent / Command / Tool
+Execution（可跳过）：外部 Agent 原生执行
     ↓
 Artifact：输出文件、规范、代码、报告
     ↓
@@ -203,7 +203,7 @@ Runtime 根据 Combination Node DAG 找到所有前置节点已经满足依赖�
 Combination Node       // Workflow 版本中的静态节点
 Combination Node Run   // 某次 Requirement 运行中的节点记录
 Combination Attempt    // 一次实际尝试或重试
-Combination Worker     // 承载 Attempt 的进程或容器
+Combination Worker     // 承载 Attempt 的容器、Worktree 与调用
 ```
 
 ### 4.1 Pre-Assess
@@ -288,10 +288,10 @@ main 上仅运行档案变化不使输入失效；交付比较排除 runs 目录
 
 ## 8. Podman：隔离 Agent 与开发环境
 
-建议默认使用 **Rootless Podman**，按 Requirement 提供独立容器运行环境：
+建议默认使用 **Rootless Podman**，按 Attempt 提供独立容器运行环境，镜像预装外部 Agent 与项目依赖：
 
-- Agent 遵循最小权限原则：默认只可操作当前 Combination Node 授权的 Requirement Worktree、工具和路径；已激活的 Workflow 与 Combination Facet 定义只读，修改必须先形成建议并经过授权生成新版本。
-- 串行执行的 Combination Worker 可以复用同需求容器；等待 Gate 时可停止容器；完成需求后删除容器。
+- runner 固定镜像 digest、原生参数和配置；可关闭外部 Agent 的内部审批与沙箱，Podman 隔离、Scope 校验、必要检查和 Gate 仍由 FacetLoom 执行。
+- 不同 Attempt 使用独立容器、Worktree 与原生会话；同一 Worker 可在检查预算内续接 Agent 多次修复。回收前确认退出并持久化证据。
 - 一次性测试或高敏感检查可用 `--rm` 临时容器。
 - 并行写入的 Combination Worker 使用独立 Worktree + 容器。
 - 代码和 Artifact 在 Git Worktree，工具链在镜像，依赖缓存可在受控 Volume；容器内部临时状态不应成为唯一结果来源。
@@ -306,7 +306,7 @@ main 上仅运行档案变化不使输入失效；交付比较排除 runs 目录
 
 - **WebUI**：Source Facet / Facet Node 编辑器、Combination Facet 与 Combination Node DAG 预览、Git Diff、日志、Gate 分项审核与人工接管、运行精炼、运行监控。
 - **Workflow Runtime**：读取 Combination Node DAG，判断就绪节点，启动和监督 Combination Worker，处理依赖、有限并行、失败恢复与 Gate 流转，**不另设 AI 智能调度器**。
-- **Combination Worker / Agent Adapter**：由 Runtime 启动，调用 Codex 等 Agent 或命令行工具，负责一个 Combination Node 的实际生命周期。
+- **Combination Worker / Agent Adapter**：由 Runtime 启动，调用预装的 Codex、Claude Code、OpenCode、Pi Agent 等外部程序，负责一次 Attempt 的实际生命周期；Adapter 仅适配原生协议。
 - **Git Manager / Podman Manager**：提供经过权限控制的宿主机操作。
 
 技术倾向：Rust + Axum；前端 React + React Flow。这些是建议选型，不是核心领域语义。

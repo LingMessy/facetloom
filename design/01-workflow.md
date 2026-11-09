@@ -34,6 +34,7 @@ Facet 之间不直接连边。Workflow 按 `facets` 声明顺序，对每个 Fac
 ├── workflows/<workflow-id>.yaml
 ├── facets/<facet-id>/facet.yaml
 ├── facets/<facet-id>/scopes.yaml          # 可选
+├── runners/<runner-id>.yaml               # 外部 Agent 调用配置
 ├── evaluators/<evaluator-id>.yaml         # AI / 脚本审核配置
 └── references/...                         # 被 Facet 或 Requirement 引用
 ~~~
@@ -55,7 +56,7 @@ exclude:
   - feature: [notification]
     layer: [application]
 execution:
-  agent: codex
+  runner: developer
   checkpoint: git-commit
   checks:
     - id: unit
@@ -81,7 +82,7 @@ integration:
 | name | 否 | 展示名称 |
 | facets | 是 | 按稳定顺序排列的 Facet 引用，至少一个 |
 | exclude | 否 | 静态排除规则，默认空列表 |
-| execution | 否 | Agent、检查点、必要检查和检查修复预算；并发配置见 Services |
+| execution | 是 | 外部 Agent 调用配置、检查点、必要检查和修复预算；并发配置见 Services |
 | gate | 否 | 每个普通 Node 继承的默认 Gate 策略 |
 | error_gate | 否 | Workflow 唯一的错误处置策略，独立于各 Node 的成果 Gate |
 | integration | 否 | 交付前运行的最终检查；格式见下文 |
@@ -90,9 +91,10 @@ Facet 列表顺序定义从外到内的替换顺序：`F1 ▷ F2 ▷ ... ▷ Fn`
 
 | 嵌套字段 | 默认值 | 定义 |
 | --- | --- | --- |
-| execution.agent | Runtime 配置 | Agent Adapter ID |
+| execution.runner | 无，必填 | source_commit 中 runners/<id>.yaml 的调用配置 ID，不使用本地配置兜底 |
 | execution.checkpoint | git-commit | 当前只支持此值；代码输出以 Git Commit 保存 |
 | execution.checks | 空列表 | Workflow 必要检查；与选中 Node 的检查累积 |
+| execution.check_environment | runner 镜像、network=disabled | 可显式配置 image_ref（digest）和 network（disabled / outbound），供必要检查及最终 integration.checks 使用 |
 | execution.max_check_retries | 2 | 同一 Attempt 内修复并重检的最大次数，非负整数 |
 | error_gate.mode | human | 四种模式之一；evaluator、context 的格式同 gate，不继承成果 gate |
 | error_gate.max_auto_recoveries | 3 | 整个 Run 共享的自动恢复动作上限，非负整数 |
@@ -103,6 +105,39 @@ Facet 列表顺序定义从外到内的替换顺序：`F1 ▷ F2 ▷ ... ▷ Fn`
 `integration.checks` 是非空有序检查列表，每项含 Workflow 内唯一的稳定 `id`、非空参数数组 `argv` 和正整数 `timeout_seconds`。命令按参数数组执行，不经 Shell 展开。`integration` 可省略；省略时 WorkflowRun 仍可完成，但不能生成通过的 IntegrationReport 或交付成果。
 
 并发上限属于每个 clone 的 Runtime 配置，不属于 Workflow 语义。
+
+### 外部 Agent 调用配置
+
+FacetLoom 通过 Adapter 调用 Codex、Claude Code、OpenCode、Pi Agent 等外部程序。模型调用、工具循环、上下文压缩与原生会话由外部 Agent 完成；FacetLoom 负责图调度、任务输入、检查和 Gate。
+
+路径：`.facetloom/runners/<runner-id>.yaml`。以下原生参数是占位符，实际文件须填写对应 Agent 版本支持的参数；不把不同程序的参数名混用。
+
+~~~yaml
+schema_version: 1
+id: developer
+adapter: claude_code
+image_ref: registry.example.com/project-agent@sha256:<image-digest>
+args: ["<native-non-interactive-arg>", "<native-bypass-approvals-arg>"]
+config_refs: []
+timeout_seconds: 1800
+network: outbound
+~~~
+
+| 字段 | 规则 |
+| --- | --- |
+| schema_version、id | 格式为 1，ID 与文件名一致，格式同 Node ID |
+| adapter | 外部 Agent 适配器 ID；接入目标为 codex、claude_code、opencode、pi_agent |
+| image_ref | OCI 镜像的不可变 digest 引用，预装对应 Agent、依赖及项目运行环境 |
+| args | 原生参数数组，可为空；按参数传递，不经 Shell 展开 |
+| config_refs | 相对当前 runner 文件的原生配置文件路径列表，默认空；source_commit 固定内容 |
+| timeout_seconds | 正整数，执行时限；1800 只是示例值，必须显式填写 |
+| network | 必填，disabled 或 outbound；outbound 允许访问模型服务，仍受 Runtime 网络边界约束 |
+
+可通过 args 或原生配置选择模型、工具、非交互模式，并按需要关闭外部 Agent 的审批和内部沙箱；FacetLoom 不定义通用的 model / parameters / tools Schema。Adapter 只负责映射调用协议，不能补充未记录的模型或权限参数。Runtime 网络策略不足以满足配置时明确报错，不静默更换调用方式。
+
+原生配置文件只读提供给 Adapter 约定的配置位置，映射规则随 Adapter 版本记录；镜像内默认配置由 image_ref 固定。不挂载宿主机 Agent 配置或共享可写会话目录，本地仅注入必要凭据与连接；参数、配置和记录均不得含明文凭据。程序启动时禁止自动升级 Agent 或临时安装依赖。
+
+Run 启动时解析执行与 AI 评估所引用的全部 runner，保存完整 profile、来源文件引用和 profile 的 JCS SHA-256 摘要。source_refs 包含 runner 文件及 config_refs 的全部原生配置文件，均固定到 source_commit 并校验内容摘要；profile_digest 不代替来源文件校验。后续 Attempt 与评估调用只引用这些固定配置；定义缺失或格式错误拒绝创建 Run，运行能力不足按执行错误或评估器故障分别处理。调用与取消协议见 [Services](05-services.md)。
 
 ### 必要检查
 
@@ -224,7 +259,7 @@ edges:
 | Node name | 否 | 展示名称 |
 | Node scope | 否 | scopes.yaml 中的 Scope ID |
 | Node context | 否 | 普通 Node 的目标、约束和资料引用 |
-| Node execution.checks | 否 | 追加必要检查；不允许覆盖 Workflow 的 Agent、检查点或重试预算 |
+| Node execution.checks | 否 | 追加必要检查；不允许覆盖 Workflow 的 runner、检查环境、检查点或重试预算 |
 | Node gate | 否 | 当前 Node 的审核模式、评估器与审核上下文；未声明字段继承 Workflow |
 
 Facet 和普通 Node 的 `context` 都是可选的，可包含 `objective`、`references` 和 `constraints`。`objective` 可省略，填写时必须是非空文本；Facet 的目标说明其共享上下文，Node 的目标说明该 Combination 的工作边界。`references` 是相对声明文件的资料路径列表，默认空；`constraints` 是约束文本列表，默认空。`start` / `end` 不得声明 `scope`、`context`、`execution` 或 `gate`。

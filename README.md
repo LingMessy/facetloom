@@ -18,7 +18,7 @@ Layer:   start → Domain ─┬→ Application ─┐
                          └→ Data ────────┴→ Presentation → end
 ```
 
-每次运行用一个 `source_commit` 固定需求、定义、资料与代码基线。Git 只保留 main 分支，Worker 在 detached Worktree 和 Rootless Podman 环境中执行。
+每次运行用一个 `source_commit` 固定需求、定义、资料与代码基线。Git 只保留 main 分支，Worker 在 detached Worktree 和 Rootless Podman 环境中执行。镜像预装外部 Agent 及项目环境；runner 固定镜像、原生参数和配置。FacetLoom 调用 Codex、Claude Code、OpenCode、Pi Agent 等程序，不实现 Agent 引擎；原生免审批模式不改变 Scope 校验、必要检查和 Gate。
 
 ```text
 main：Requirement + Workflow + Facets + 正式代码 + 精简运行档案
@@ -43,7 +43,8 @@ Refinement → 人类筛选记录 → Agent 建议 → 采纳并验证
 | Combination | 节点替换积生成、带 Facet 来源映射的业务执行单元 |
 | WorkflowRun | 固定输入与 DAG 的一次运行 |
 | CombinationRun / Attempt | 一个节点的运行状态及一次执行、重试或评估 |
-| Worker | 承载 Attempt 的隔离进程或容器 |
+| Runner | Git 管理的外部 Agent 调用配置 |
+| Worker / Invocation | 一个 Attempt 的隔离执行生命周期及一次外部调用 |
 | ErrorRecord | 准备、执行失败或成果拒绝的不可变错误材料 |
 | CheckReport | Runtime 的必要检查轮次、被检查 Tree 与真实结果 |
 | GateReport / GateDecision | 成果审核及错误处置的报告与决定，均支持四种模式 |
@@ -53,12 +54,12 @@ Refinement → 人类筛选记录 → Agent 建议 → 采纳并验证
 
 ```text
 .facetloom/
-├── requirements/ workflows/ facets/ references/ evaluators/  # main 上的正式定义
+├── requirements/ workflows/ facets/ references/ runners/ evaluators/  # main 上的正式定义
 ├── runs/<run-id>/                                 # main 上的精简档案
 └── .runtime/                                     # 本地状态，不进入 Git
 ```
 
-每个协作者在自己的 clone 创建不同 Run。main 共享精简状态、结果、决策和证据引用；本地通过文件事务保存活动 Worker、待发布操作、完整对话和恢复信息。SQLite 可选。大型证据与执行/评估的实际初始请求存于 Git 外的持久 Artifact，档案记录 URI 与摘要；需长期复核的代码快照导出为持久 Git bundle。
+每个协作者在自己的 clone 创建不同 Run。main 共享精简状态、结果、决策和证据引用；本地通过文件事务保存活动 Worker、待发布操作、完整对话和恢复信息。SQLite 可选。大型证据与实际外部调用输入存于 Git 外的持久 Artifact，档案记录 URI 与摘要；需长期复核的代码快照导出为持久 Git bundle。记录覆盖 FacetLoom 提供的输入与可观测事件，不承诺外部 Agent 的隐藏推理或内部模型请求。
 
 审核定义统一进入 Git。Workflow 与 Node 的必要检查累积，同一 Attempt 默认最多修复并重检 2 次；完成后冻结成果输入。执行失败或成果拒绝交给独立错误 Gate，决定重试、修复上游、等待或停止；默认人工，每个 Run 最多自动恢复 3 次。恢复获准不代表成果被接受，补测或修改冻结成果需要新 Attempt。
 
