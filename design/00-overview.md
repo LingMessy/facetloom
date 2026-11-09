@@ -51,6 +51,8 @@ Workflow 按 Facet 声明顺序从外到内应用 DAG 节点替换积，例如 `
 | Refinement | 筛选记录、提出并落实改进的交互过程 | 本地会话；结果体现在 main 的修改与 Commit 描述 |
 | Runtime State | 队列、Worker、容器和未发布操作 | clone-local；SQLite 可选 |
 
+Context Snapshot 保存有效上下文清单，实际初始请求由 Attempt / GateReport 引用持久 Artifact。执行与必要检查完成后冻结审核输入；后续 Gate 报告是审核输出，不回写执行证据。审核定义统一由 source_commit 固定，本地只配置凭据、连接和资源上限。
+
 每个普通 Node 声明或继承一项 Gate：human、ai_assisted、ai、script。Combination 的各项独立审核同一固定输出，全部批准才接受成果；自动异常转交人类。最终代码交付仍需人类确认。
 
 ## 单 main 与隔离执行
@@ -97,7 +99,6 @@ Git 分支只有 `main`。DAG 分支由独立 Worktree 执行；输入与 Checkp
 └── .runtime/                             # 加入 gitignore
     ├── runs/<run-id>/                    # 完整状态、待发布记录
     ├── worktrees/<attempt-id>/
-    ├── evaluators/<id>.yaml               # 可选本地配置，有效值写入 Snapshot
     ├── gate-tasks/<report-id>.yaml         # 活动评估、取消与恢复
     ├── logs/
     ├── refinements/<refinement-id>/

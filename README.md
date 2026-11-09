@@ -56,7 +56,9 @@ Refinement → 人类筛选记录 → Agent 建议 → 采纳并验证
 └── .runtime/                                     # 本地状态，不进入 Git
 ```
 
-每个协作者在自己的 clone 创建不同 Run。main 共享精简状态、结果、决策和证据引用；本地保存活动 Worker、待发布操作、完整对话和恢复信息。SQLite 可选。大型证据存于 Git 外，需长期复核的代码快照导出为持久 Git bundle。
+每个协作者在自己的 clone 创建不同 Run。main 共享精简状态、结果、决策和证据引用；本地保存活动 Worker、待发布操作、完整对话和恢复信息。SQLite 可选。大型证据与执行/评估的实际初始请求存于 Git 外的持久 Artifact，档案记录 URI 与摘要；需长期复核的代码快照导出为持久 Git bundle。
+
+审核定义统一进入 Git。执行与必要检查完成后冻结审核输入，各 Gate 报告作为审核输出保存；补测或修改成果需要新 Attempt。
 
 只改变运行档案不会使运行输入失效。交付前对比 source_commit 与最新 main，排除 `.facetloom/runs/` 后有代码或定义变化则创建新 Run；交付提交保留最新档案。
 

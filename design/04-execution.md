@@ -12,14 +12,16 @@ sequenceDiagram
     participant G as 各 Node 的 Gate
     RT->>GM: 汇聚前驱输入，创建 Context Snapshot
     RT->>RT: 原子持久化 Attempt=pending 与节点状态
-    RT->>W: 启动独立 detached Worktree 和容器
+    RT->>RT: 保存 Adapter 组装的初始请求与 agent_input_ref
+    RT->>W: 启动独立 detached Worktree 和容器，提交已保存请求
     RT->>RT: 持久化 Attempt=running
     W->>W: Pre-Assess、执行与验证
     W->>GM: 请求 Checkpoint
     GM-->>W: 本地输出 Commit
     W->>RT: Post-Assess、结果与证据
-    RT->>RT: 持久化 waiting_gate
-    RT->>GM: 保存持久证据并发布精简档案到 main
+    RT->>GM: 完成证据与初始请求的持久化、引用校验
+    RT->>RT: 固定审核输入与 review_input_digest，持久化 waiting_gate
+    RT->>GM: 发布精简档案到 main
     GM-->>RT: waiting_gate 材料发布成功
     RT->>G: 并行评估固定上下文、代码与证据
     G-->>RT: 分项报告 / 决策
@@ -100,16 +102,71 @@ execution:
 | Node 与 Scope | 按 DAG members 解析，目标与约束合成，来源仍可追溯 |
 | 前驱输入 | direct_predecessors 各项固定 combination_id、attempt_id、output_commit |
 | 执行环境 | 固定 Adapter、工具、有效路径、网络和环境摘要；凭据只记录类别与用途 |
-| 修复要求 | 有修复请求时记录指令与原决策的不可变引用；失败代码不会自动成为新输入 |
+| 修复要求 | 记录人类确认的修复/补测指令与原报告或决策的不可变引用；失败代码不会自动成为新输入 |
 | Gate 策略 | gates 按 Facet 声明顺序列出每个选中 Node 的 gate_id、完整有效 policy 与 policy_digest；缺项、重复项或来源不匹配时拒绝启动 |
 
-`policy.context.objectives` 按 Workflow → Node 顺序累积目标，其他约束和资料同样累积并保留来源；任务上下文仍作为共同审核输入。`policy.evaluator` 保存完整有效配置，不能只有 ID 或摘要。仓库来源由 source_commit 固定；本地配置来源在 policy 中另记 `evaluator_source: runtime:<id>`，其值已内联，不依赖日后读取本地文件。
+`policy.context.objectives` 按 Workflow → Node 顺序累积目标，其他约束和资料同样累积并保留来源；任务上下文仍作为共同审核输入。`policy.evaluator` 保存完整有效配置，不能只有 ID 或摘要。审核指令、模型、参数、脚本及环境定义统一来自 source_commit；本地只提供凭据、连接和资源上限，无法满足固定配置时阻塞。
 
-`policy_digest` 对 policy 按 RFC 8785（JCS）规范化后的 UTF-8 JSON 字节求 SHA-256；仅允许该规范支持的 JSON 值。Decision / GateReport 的 gate_policy_digest 必须等于对应项摘要。Snapshot 文件名仍对完整 YAML 文件字节求摘要。策略或有效评估器配置变化需要新 Snapshot 与新 Attempt；改变 Workflow / Node 定义则需要新 Run。
+`policy_digest` 对 policy 按 RFC 8785（JCS）规范化后的 UTF-8 JSON 字节求 SHA-256；仅允许该规范支持的 JSON 值。Decision / GateReport 的 gate_policy_digest 必须等于对应项摘要。Snapshot 文件名仍对完整 YAML 文件字节求摘要。任务输入变化需要新 Snapshot 与新 Attempt；Workflow、Node 或评估器定义变化需要新 Run。
 
 根节点以 source_commit 为代码基线。单前驱可复用其有效输出 Commit；多前驱按 Combination ID 排序、去重输出 Commit 后合并，记录有序父提交列表。相同输入集合使用相同合并策略与工具版本生成相同 Tree；时间等元数据不要求产生相同 Commit OID。
 
 文本冲突可在输入 Tree 中保存标记并列出路径，由汇聚 Worker 先解决；二进制或删改冲突记录冲突类型和各方内容引用。无法安全形成或解决输入时 Attempt failed、节点 blocked，等待人类处理；未解决冲突不能提交 Gate。
+
+## 实际初始输入
+
+Context Snapshot 是有效输入清单；Adapter 实际提交的初始消息、工具声明及附件清单作为 Artifact 留存。附件内容内联或使用可恢复的不可变引用，不能只记录临时路径。动态工具结果与后续对话按日志规则保存，不要求写入初始输入 Artifact。
+
+| 引用 | 所属记录 | 保存时机 |
+| --- | --- | --- |
+| agent_input_ref | Attempt | 启动 Agent 前保存实际初始请求；waiting_gate 前验证持久可读 |
+| request_input_ref | GateReport | 调用自动评估器前保存实际初始请求；发布报告前验证持久可读 |
+
+```yaml
+agent_input_ref:
+  type: artifact
+  uri: artifacts://inputs/<immutable-key>
+  digest: sha256:<input-file-bytes-digest>
+  media_type: application/json
+```
+
+Adapter 先组装并本地原子保存请求，再发送同一内容，不能事后根据定义重新生成来代替原请求。引用在请求形成时分配不可变 URI 与摘要，本地待上传状态单独记录；上传使用同一内容和引用，不改写 Attempt 输入。传输结果未知时按本地调用记录对账，不能声称请求一定送达或自动重复发送。
+
+留存内容只覆盖 FacetLoom 可观测的实际请求；服务认证凭据由传输层注入，不进入消息或 Artifact。不记录服务商内部提示或模型内部状态，也不承诺相同输入产生相同输出。Gate 请求不包含自身 request_input_ref，避免摘要自引用。
+
+## 固定审核输入
+
+```text
+执行、必要测试与 Post-Assess 完成
+    ↓
+代码、执行证据及初始请求持久化并校验
+    ↓
+固定审核输入 → 发布 waiting_gate
+    ↓
+各 Gate 审核 → 分项报告与决策 → 全部批准
+```
+
+进入 waiting_gate 前，Runtime 确认必要检查已结束、执行结论已形成、所有引用可读且摘要匹配。检查结束不等于检查通过；已有失败结论可作为固定证据交由 Gate 判断，但缺少必需材料不能开始正式审核。
+
+`review_input_digest` 为以下五个字段组成对象按 RFC 8785（JCS）规范化后的 UTF-8 JSON 字节的 SHA-256，格式为 `sha256:<hex>`：
+
+```json
+{
+  "context_snapshot_ref": "contexts/<sha256>.yaml",
+  "input_commit": "<full-commit-oid>",
+  "outcome": "changed",
+  "summary": "实现登录失败限制，执行检查已完成",
+  "output_refs": [
+    {"role": "code", "ref": {"type": "git_object", "object_type": "commit", "oid": "<output-commit-oid>"}}
+  ]
+}
+```
+
+示例仅展示摘要结构；实际 output_refs 包含全部执行证据及必要的 bundle 引用。上述字段进入 waiting_gate 后冻结，连同引用内容均不得修改、追加或替换。代码引用解析出的 Tree 必须等于 evaluated_tree；agent_input_ref 在发送前已固定，不随审核变化。
+
+状态、时间及 gate_report_refs / gate_decision_refs 可继续推进，但不进入审核输入摘要。各 Gate 的报告、建议和决策理由是审核输出，不写回 output_refs，也不自动成为其他 Gate 的输入。评估请求、GateReport 和 GateDecision 都携带 review_input_digest；Runtime 重新计算并校验，不能仅相信记录中的摘要。
+
+缺少执行证据时 Gate 返回 Blocked / Escalated。人类若决定补测、重新执行或修改代码，先终止旧 Attempt，再按现有输入构造规则创建新 Attempt，全部 Gate 重新审核；不新增审核轮次或仅审核的 Attempt 类型。评估器故障可由人类请求对原固定材料重评；人类仅解释已有材料时，将理由记录在 Decision 中。
 
 ## Checkpoint 与代码保留
 
@@ -140,7 +197,7 @@ Git Manager 为有代码变化的 Attempt 创建一个输出 Commit，以 input_
 
 ## 证据引用
 
-小型对象留在运行档案；大日志、完整对话、截图与 bundle 留在 Git 外。main 只保存简短结论、URI 和摘要。以下是 output_refs 的代码引用及恢复来源：
+小型对象留在运行档案；实际初始请求、大日志、完整对话、截图与 bundle 留在 Git 外。main 只保存简短结论、URI 和摘要。以下是 output_refs 的代码引用及恢复来源：
 
 ```yaml
 output_refs:
@@ -187,7 +244,7 @@ related_refs:
     digest: sha256:<file-bytes-digest>
 ```
 
-run_record 的路径相对对应运行目录，不得越出目录。Context Snapshot、Decision、Checkpoint 和 Report 引用的目标必须同 Commit 发布或已存在且内容匹配。清理时保留有效引用目标；仅当引用来源可更新时，才可先转换成删除前 Commit 的 git_file。不可变来源保留时，其依赖也保留。可变 Attempt 用稳定 ID 关联，审核并发控制另用其文件摘要。
+run_record 的路径相对对应运行目录，不得越出目录。Context Snapshot、Decision、Checkpoint 和 Report 引用的目标必须同 Commit 发布或已存在且内容匹配。清理时保留有效引用目标；仅当引用字段可更新时，才可先转换成删除前 Commit 的 git_file。不可变对象或 Attempt 的冻结字段仍被保留时，其依赖也保留。Attempt 用稳定 ID 关联；审核材料由 review_input_digest 校验，记录并发写入另用完整 Attempt 文件摘要。
 
 output_refs 在 waiting_gate 前可为空；waiting_gate 必须有且仅有一个 role: code 引用。outcome 为 changed、no_change 或 not_applicable；不适用结论须有可核对的理由，且经过该 Attempt 的全部 Gate。拒绝、失败或取消的输出不能满足后继。
 

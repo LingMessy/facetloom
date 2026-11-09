@@ -39,7 +39,6 @@ flowchart LR
 ├── runs/<run-id>/             # 完整状态、不可变快照和待发布操作
 ├── worktrees/<attempt-id>/    # detached Worktree
 ├── workers/<attempt-id>.yaml  # 进程、容器和恢复标记
-├── evaluators/<id>.yaml       # 可选的本地评估器定义
 ├── gate-tasks/<report-id>.yaml # 评估任务、取消、接管与恢复标记
 ├── logs/                     # 完整日志与对话
 ├── refinements/<id>/          # 会话、候选 Diff、验证结果
@@ -53,9 +52,9 @@ flowchart LR
 
 这是 Runtime 内的一项职责，不另设持久 GateRun：
 
-1. 启动 Run 时校验 Node 继承后的模式、评估器与引用；创建 Attempt 时把完整有效配置固定到 Context Snapshot。
-2. waiting_gate 材料发布后，按 gate_id 发起独立评估；human 等待人类，ai_assisted 先生成建议，ai / script 返回自动结果。
-3. 调用前保存 report_id、固定材料、前一决策 ID 和本地任务状态。同一项同时最多一个活动评估；不同项可并行，限制沿用 clone 的并发配置。
+1. 启动 Run 时从 source_commit 校验 Node 继承后的模式、评估器与引用；创建 Attempt 时把完整有效配置固定到 Context Snapshot。本地仅提供凭据、服务连接和资源上限，能力不足时阻塞。
+2. 执行与必要检查完成、材料持久化且 review_input_digest 固定后，发布 waiting_gate；发布成功后，按 gate_id 发起独立评估；human 等待人类，ai_assisted 先生成建议，ai / script 返回自动结果。
+3. 调用前保存 report_id、review_input_digest、实际初始评估请求、前一决策 ID 和本地任务状态。发布报告前持久化 request_input_ref，只有请求尚未形成即失败时可为空。同一项同时最多一个活动评估；不同项可并行，限制沿用 clone 的并发配置。
 4. 验证评估输出，保存 GateReport；按模式收集或生成 GateDecision，再串行合并分项引用。自动故障或无法判断时暂停该项并提示人工处理。
 5. 接管、取消、拒绝或输入失效时，先持久化撤销任务，再停止评估进程；迟到结果不能推进状态。重启对账已有报告和决策，不重复决定；无法恢复的评估记录故障并等待人工处理。
 
@@ -70,7 +69,8 @@ Git Manager 是唯一执行受信 Git 写入的组件；管理 main、隔离 Wor
 | 创建运行 | source_commit、当前需求、定义、DAG 与 Run ID 唯一性 |
 | 保存 Checkpoint | Attempt、输入、修改范围、取消或失效状态 |
 | 发布档案 | owner_runtime_id、预期记录摘要、ID、引用和持久证据 |
-| 保存 Gate | 分项策略、实际决策主体与报告/接管依据、当前 Attempt 摘要、同 gate_id 前一决策和 evaluated_tree |
+| 发布 waiting_gate | 必要检查已结束、agent_input_ref 与执行证据持久可读、固定字段与 review_input_digest 一致 |
+| 保存 Gate | 重新计算 review_input_digest、分项策略、主体与报告/接管依据、当前 Attempt 摘要、同 gate_id 前一决策和 evaluated_tree |
 | 发布定义 | 人类审阅、Requirement 新版规则、定义和 DAG 校验 |
 | 集成交付 | current、project_tree、有效输出、Report、人类确认 |
 | Refinement 提交 | 来源与目标摘要、确认 Diff、验证结果、清理引用完整性 |
@@ -115,5 +115,7 @@ Refinement 是 Runtime 提供的本地交互功能，不是独立共享审批服
 Gate 评估、最终检查与 Refinement 验证也在隔离环境执行，输入由 Git Manager 固定；测试产生的临时文件不进入候选代码。停止 Worker 后由 Runtime 确认状态，再回收容器和不再需要的 Worktree。
 
 ## Agent Adapter
+
+Adapter 先组装并本地保存实际初始请求，再发送原内容；执行请求使用 agent_input_ref，审核请求使用 GateReport.request_input_ref。记录消息、工具声明和附件清单，凭据由传输层注入，不混入留存内容；不以事后重建的提示代替实际请求。
 
 执行与精炼输入为固定上下文、Worktree、允许工具、限制和取消信号；输出为简短结论、变更路径、证据及 Checkpoint 请求。Gate 评审输入为固定审核材料和有效策略，输出为 result、rationale、evidence_refs。AI 模式下该输出可作为决策依据；Adapter 不自行写入 Decision 或接受成果，不扩大范围，不冒充人类确认，实际状态由 Runtime 推进。

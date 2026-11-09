@@ -20,6 +20,8 @@ main：正式需求、Workflow、Facet、代码与精简运行档案
 | 本地状态 | 保存队列、活动 Attempt、Worker、未发布操作和精炼会话；SQLite 可选 |
 | 大型证据 | Git 外持久保存；main 记录 URI 与摘要，代码复核使用可恢复 bundle |
 | Gate | 每个 Node 继承或声明 human、ai_assisted、ai、script；各项全部批准，异常转交人类 |
+| 审核输入 | 执行与必要检查完成后冻结；审核报告单独保存，补测需新 Attempt |
+| 审核配置 | 定义统一进入 Git；本地只配置凭据、连接与资源上限 |
 | 人类确认 | 正式定义发布、成果交付和 Refinement 采纳由人类决定 |
 | 输入有效性 | 排除运行档案后比较正式输入；仅档案变化不使运行失效 |
 | 精炼目标 | 减少当前目录和 Agent 上下文，Git 历史继续可追溯 |
@@ -30,6 +32,7 @@ main：正式需求、Workflow、Facet、代码与精简运行档案
 
 - 用稳定对象 ID、固定 Git 文件引用和持久 Artifact 关联需求、约束、Combination、Attempt、代码、测试与 Gate。
 - main 只保留目标、结果、返工原因、验证结论、未解决问题及证据引用；完整对话与临时输出留在本地。
+- 保存执行/评估的实际初始请求为持久 Artifact；验证冻结材料摘要与分项报告更新互不干扰。
 - 验证四种 Gate 模式、Node 继承、混合并行审核、异常接管与新 Attempt 重新审核。
 - 验证不同 clone 的档案并发发布、同一 Run 的摘要校验、本地恢复和 bundle 跨 clone 复核。
 

@@ -96,17 +96,19 @@ execution:
 
 ## 从运行到交付
 
-1. 人类审阅并在 main 发布 Requirement r1、current、Workflow 和 Facet。
+1. 人类审阅并在 main 发布 Requirement r1、current、Workflow、Facet 和审核评估器定义。
 2. Runtime 固定 source_commit，生成 DAG，先本地持久化，再发布初始精简档案。代码仍未变。
-3. Runtime 为根节点创建 Attempt，先保存本地输入再启动 detached Worktree 与容器。各 Worker 独立执行。
-4. Git Manager 保存 Checkpoint。进入 waiting_gate 前导出必要 bundle、保存测试证据，并把精简上下文与结果发布 main。
-5. Runtime 并行调度该 Attempt 的各项 Gate。分项报告与 Decision 发布；全部批准和关联状态发布成功后，后继才可执行。
+3. Runtime 为根节点创建 Attempt，Adapter 组装并保存实际初始请求和 agent_input_ref，再启动独立 Worker 并发送原请求。
+4. 完成必要测试、Checkpoint 与 Post-Assess；验证初始请求、bundle 和执行证据持久可读，固定 review_input_digest，进入 waiting_gate 并发布 main。
+5. Runtime 并行调度各项 Gate，调用前保存实际评估请求，报告通过 request_input_ref 引用。各项报告只作为审核输出发布，不改写执行证据；全部批准和关联状态发布成功后，后继才可执行。
 6. application 与 data 并行，presentation 汇聚输入。若 Gate 发现缺少锁定到期后的恢复行为并拒绝成果，当前节点 blocked；人类确认修复 domain 后，将其及相关后继标为 stale，再重新执行。
 7. 所有节点 satisfied，Run completed。summary 记录结果、返工原因和待改进问题；完成不等于已经交付。
 8. 另一个 clone 此时发布自己的 Run 档案。main 头变化，但 project_tree 不变，当前运行仍可交付。
 9. Git Manager 在最新 main 上构造代码候选，保留全部最新档案，运行最终检查；人类确认后提交代码，并追加 DeliveryRecord。
 
 如果第 8 步发生的是正式代码或定义变化，交付要求新 Run；同步到 r2 时取消旧版未终态运行，旧成果不能交付。
+
+审核过程中，如果脚本 Gate 检查失败，它返回 Rejected，整个 Attempt 被拒绝；无需给已批准的 AI Gate 增加一轮审核。如果缺少 Worker 应提供的测试报告，则暂停等待人类处理；决定补测后终止旧 Attempt，按原输入构造规则新建 Attempt 并重新审核全部 Gate。评估器单纯超时可对原固定材料重评。
 
 ## 从记录到改进
 
@@ -140,7 +142,7 @@ main
 └── refinements/<id>/
 
 持久 Artifact
-└── 可恢复代码的 bundle、测试报告与大型证据
+└── 执行/评估初始请求、可恢复代码的 bundle、测试报告与大型证据
 ```
 
 ## 验收场景
@@ -155,7 +157,15 @@ main
 | 不同 Run 同时推送 | 刷新后自动追加，互不覆盖 |
 | Node 未声明 Gate / 仅声明部分字段 | 继承 Workflow 默认，mode 缺省 human；审核上下文累积且可追溯 |
 | human / ai_assisted / ai / script | 分别由人类、人类、AI、程序决策；AI 建议本身不算批准 |
-| 自动模式缺少或错配评估器 | 校验失败，不隐式切换模式 |
+| 自动模式缺少或错配评估器 | 校验失败，不使用本地替代定义 |
+| clone 无法满足固定模型、工具或环境 | 阻塞，不静默切换配置 |
+| 必要测试未结束或引用未持久化 | 不进入正式审核 |
+| 实际初始请求留存 | 发送前本地保存；通过持久引用读取并校验字节摘要 |
+| 评估请求未形成就失败 | error 报告允许 request_input_ref 为 null，说明原因 |
+| 修改冻结字段或替换引用内容 | 审核输入/内容摘要校验失败，不能发布决策 |
+| 仅更新分项报告、决策或状态 | review_input_digest 不变，其他独立审核仍有效 |
+| Gate 检查失败 | 报告属于审核输出，可拒绝成果，不回写 output_refs |
+| 审核中发现缺少执行证据 | Blocked / Escalated；补测需人类确认新 Attempt，全部重新审核 |
 | 多项 Gate 混合并行、部分批准 | 仍 waiting_gate；全部批准发布后才 satisfied |
 | 任一 Gate 拒绝 | Attempt rejected，其余活动评估取消；迟到批准不生效 |
 | 超时、非零退出、无效结果或无法判断 | 保存故障/升级证据，暂停该项等待人类处理，不自动通过或拒绝 |

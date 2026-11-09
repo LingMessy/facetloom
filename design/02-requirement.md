@@ -245,11 +245,12 @@ updated_at: "2026-11-04T12:00:00Z"
 | 事件 | Attempt | CombinationRun |
 | --- | --- | --- |
 | 开始执行 | 创建 `pending`，启动后为 `running` | `running` |
-| 执行结束，材料完整 | `waiting_gate` | `waiting_gate` |
+| 执行与必要检查结束、材料持久化且摘要固定 | `waiting_gate` | `waiting_gate` |
 | 部分 Gate `Approved` | 保持 `waiting_gate` | 保持 `waiting_gate` |
 | 全部 Gate `Approved` 且发布成功 | `accepted` | `satisfied`，设置 `accepted_attempt_id` |
 | 任一 Gate `Rejected` | `rejected`，取消其余活动评估 | `blocked`；人类确认重试后回到 `pending` |
 | Gate `Escalated` / `Blocked` 或评估故障 | 保持 `waiting_gate`，保存报告或决策 | 保持 `waiting_gate`，等待人类处理该项；其余项可继续 |
+| 人类确认补测或修改冻结成果 | 未终态旧 Attempt → `cancelled`，已终态记录保留；创建新 Attempt | 按既有重试/修复规则推进 |
 | Worker 失败或丢失 | `failed` | `blocked`；人类确认重试后回到 `pending` |
 | 输入失效 | 活动 Attempt 变为 `cancelled` | `stale`，清空 `accepted_attempt_id` |
 | WorkflowRun 取消 | 活动 Attempt 变为 `cancelled` | 未满足节点为 `cancelled`，已满足节点保留历史 |
@@ -269,6 +270,8 @@ domain → pending → 新 Attempt
 ~~~
 
 默认不自动重试；人类确认重试后创建新 Attempt。输入不变时可复用 Context Snapshot，但新 Attempt 的所有 Gate 必须重新审核；失败或拒绝的代码仅作为证据参考，不自动成为新输入。
+
+审核中确认补测或修复时，未终态旧 Attempt 先取消，已终态记录保持原状态；新 Snapshot 写入人类确认的要求与原 Gate 报告/决策引用。新 Attempt 仍由根基线或当前有效前驱构造输入，不自动复用旧 Attempt 的代码输出。WorkflowRun 已终态时遵循新建 Run 规则。
 
 自动 Gate 的修复建议先阻塞当前成果，须经人类确认才安排修复。修复范围为目标节点加全部可达后继，未执行的后继也进入 `stale`；无依赖分支继续运行。目标必须是当前节点或其祖先。修复决定及原决策引用写入状态原因，并传入新 Context Snapshot。依赖再次满足后，Runtime 将已由人类确认的修复范围内的 `stale` 节点转回 `pending`。
 
@@ -319,10 +322,12 @@ stateDiagram-v2
 | `attempt_number` | 是 | 该 CombinationRun 内从 1 递增的序号。 |
 | `context_snapshot_ref` | 是 | 运行档案内 `contexts/<sha256>.yaml` 的不可变路径，固定 Requirement、Workflow、组合上下文、前驱成果和执行限制。 |
 | `input_commit` | 是 | 必须等于 Context Snapshot 中的 `input_commit`；此 Attempt 的代码基线。 |
+| `agent_input_ref` | 条件 | 实际初始请求的 Artifact 引用；pending 时可为 null，启动 Agent 前赋值并固定，正式审核前验证持久可读。 |
 | `status` | 是 | 当前 Attempt 状态。 |
 | `outcome` | 条件 | 进入 waiting_gate 时填写 changed、no_change 或 not_applicable；执行失败可为空。 |
 | `summary` | 条件 | waiting_gate 或终态时的简短结果；not_applicable 必须说明理由。 |
 | `output_refs` | 是 | 带类型的不可变输出引用，初始为空；等待 Gate 时恰有一个 `role: code` 的 Commit 引用。格式见 [Execution](04-execution.md)。 |
+| `review_input_digest` | 条件 | waiting_gate 前生成并固定；对上下文引用、代码输入、执行结论、摘要及输出引用求 SHA-256，算法见 Execution。 |
 | `gate_decision_refs` | 是 | gate_id → `decisions/<decision-id>.yaml` 的映射，初始为空；每项指向该 Gate 的最新决策。 |
 | `gate_report_refs` | 是 | gate_id → `reports/<report-id>.yaml` 的映射，初始为空；保存最新建议、自动结果或故障报告。 |
 | `status_reason` | 条件 | `failed` 或 `cancelled` 时的原因。 |
@@ -340,10 +345,12 @@ combination_id: "development/feature:login/layer:domain"
 attempt_number: 1
 context_snapshot_ref: contexts/9a41....yaml
 input_commit: 8b8c0f1...
+agent_input_ref: null
 status: pending
 outcome: null
 summary: null
 output_refs: []
+review_input_digest: null
 gate_decision_refs: {}
 gate_report_refs: {}
 created_at: "2026-11-04T12:00:00Z"
@@ -352,13 +359,15 @@ finished_at: null
 updated_at: "2026-11-04T12:00:00Z"
 ```
 
-Attempt 身份和输入字段在首次本地持久化后不可改；`outcome` 和代码输出在进入 `waiting_gate` 时固定。Gate 映射键必须来自 Snapshot 的有效 Gate 列表，目标必须匹配同一 Attempt、gate_id、上下文、策略和输出 Tree；历史报告及决策文件保留。等待评估期间只可追加证据和更新各项 Gate 引用；代码或输入变化须创建新 Attempt。`worker_ref` 是本地进程或容器引用，不写入 Git。
+Attempt 身份、context_snapshot_ref 和 input_commit 在首次本地持久化后不可改。agent_input_ref 在 pending 阶段允许从 null 设置一次，发送前固定。outcome、summary、output_refs 和 review_input_digest 在进入 waiting_gate 时固定，此后不能追加或替换执行证据。
+
+Gate 映射键必须来自 Snapshot 的有效 Gate 列表，目标必须匹配同一 Attempt、gate_id、review_input_digest、上下文、策略和输出 Tree。审核期间只推进状态、时间及各项报告/决策引用，历史文件保留。补测或修改成果需要新 Attempt；评估器故障仅对原材料重评。`worker_ref` 是本地进程或容器引用，不写入 Git。
 
 | 状态 | 定义 |
 | --- | --- |
 | `pending` | Attempt 已固定输入，尚未启动 Worker。 |
 | `running` | Worker 正在执行。 |
-| `waiting_gate` | Worker 执行结束，等待 Gate 决策。 |
+| `waiting_gate` | 执行结束且审核输入已冻结，等待各项 Gate 决策。 |
 | `accepted` | 所有 Gate 批准且发布成功，结果已登记为当前有效输出。 |
 | `rejected` | Gate 拒绝；结果保留为证据，不可用作后继输入。 |
 | `failed` | Worker 或执行基础设施失败。 |

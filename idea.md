@@ -231,7 +231,7 @@ Post-Assess 检查是否遗漏相关变更、是否引入其他模块影响。Ga
 
 Gate 持续检查组合成果是否符合人类需求、架构和功能行为。Gate 有 human、ai_assisted、ai、script 四种模式，分别由人类、人类、AI、程序决策。各项可以并行，异常暂停并交由人类处理；最终交付仍由人类确认。
 
-Requirement 不拥有独立 Gate；Verification Facet 表达节点级验证，最终集成检查验证整体结果。决策固定 Attempt、上下文与代码 Tree；变化后的结果不能复用旧批准。
+Requirement 不拥有独立 Gate；Verification Facet 表达节点级验证，最终集成检查验证整体结果。执行与必要检查完成后固定审核输入；Gate 报告属于审核输出，不回写执行证据。补测或修改成果需要新 Attempt，不能复用旧批准。审核定义统一进入 Git，执行与评估的实际初始请求通过持久 Artifact 留存。
 
 结果为 Approved、Rejected、Escalated、Blocked。拒绝可定位当前或上游 Combination；修复后相关后继重新评估。人类决策与运行结果在关键节点以精简档案发布 main。
 

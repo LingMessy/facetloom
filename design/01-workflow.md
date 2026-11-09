@@ -84,7 +84,7 @@ Facet 列表顺序定义从外到内的替换顺序：`F1 ▷ F2 ▷ ... ▷ Fn`
 | execution.agent | Runtime 配置 | Agent Adapter ID |
 | execution.checkpoint | git-commit | 当前只支持此值；代码输出以 Git Commit 保存 |
 | gate.mode | human | `human`、`ai_assisted`、`ai` 或 `script` |
-| gate.evaluator | 无 | AI / 脚本评估器 ID；自动评估必须提供匹配类型的配置 |
+| gate.evaluator | 无 | source_commit 中的 AI / 脚本评估器 ID；自动评估必须提供匹配类型的配置 |
 | gate.context | 空 | 审核目标、约束与资料；与 Node 的审核上下文累积 |
 
 `integration.checks` 是非空有序检查列表，每项含 Workflow 内唯一的稳定 `id`、非空参数数组 `argv` 和正整数 `timeout_seconds`。命令按参数数组执行，不经 Shell 展开。`integration` 可省略；省略时 WorkflowRun 仍可完成，但不能生成通过的 IntegrationReport 或交付成果。
@@ -230,6 +230,8 @@ flowchart LR
 ~~~
 
 引用资料保留来源并按内容去重；目标和约束累积，不按列表顺序覆盖。约束冲突时阻塞并请求评估。一个 Scope 内的路径取并集，各选中 Node 的 Scope 之间取交集；未声明 Scope 不增加限制。最终读写范围还须与 Runtime 配置允许的路径取交集。
+
+Snapshot 保存有效输入清单，Adapter 实际发送的初始上下文另通过 Attempt.agent_input_ref 留存，规则见 [Execution](04-execution.md)。执行、必要测试和 Post-Assess 完成后冻结审核输入，再启动各项 Gate。
 
 动态 Applicability 和 Pre-Assess 在 Attempt 中执行，不改变组合 DAG。Applicability 明确为不适用时，Attempt 必须保存理由和证据；无法判断时阻塞，不能默认跳过 Workflow 要求的验证。
 
