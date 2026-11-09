@@ -25,7 +25,7 @@ main：Requirement + Workflow + Facets + 正式代码 + 精简运行档案
     ↓ source_commit
 本地 Runtime → Combination DAG → 并行 Worker / Worktree
     ↓
-Checkpoint → 测试与证据 → 各 Node 的 Gate 全部批准 → 汇聚
+必要检查与预算内修复 → Checkpoint → 各 Node 的 Gate 全部批准 → 汇聚
     ↓
 最终集成检查与人类确认 → 代码提交 main
     ↓
@@ -44,7 +44,8 @@ Refinement → 人类筛选记录 → Agent 建议 → 采纳并验证
 | WorkflowRun | 固定输入与 DAG 的一次运行 |
 | CombinationRun / Attempt | 一个节点的运行状态及一次执行、重试或评估 |
 | Worker | 承载 Attempt 的隔离进程或容器 |
-| GateReport / GateDecision | 各项审核的报告与决策，支持人类、AI 辅助、AI 和脚本模式 |
+| ErrorRecord | 准备、执行失败或成果拒绝的不可变错误材料 |
+| GateReport / GateDecision | 成果审核及错误处置的报告与决定，均支持四种模式 |
 | Refinement | 人机筛选运行记录、落实改进并清理已处理记录的过程 |
 
 ## 存储与协作
@@ -56,9 +57,9 @@ Refinement → 人类筛选记录 → Agent 建议 → 采纳并验证
 └── .runtime/                                     # 本地状态，不进入 Git
 ```
 
-每个协作者在自己的 clone 创建不同 Run。main 共享精简状态、结果、决策和证据引用；本地保存活动 Worker、待发布操作、完整对话和恢复信息。SQLite 可选。大型证据与执行/评估的实际初始请求存于 Git 外的持久 Artifact，档案记录 URI 与摘要；需长期复核的代码快照导出为持久 Git bundle。
+每个协作者在自己的 clone 创建不同 Run。main 共享精简状态、结果、决策和证据引用；本地通过文件事务保存活动 Worker、待发布操作、完整对话和恢复信息。SQLite 可选。大型证据与执行/评估的实际初始请求存于 Git 外的持久 Artifact，档案记录 URI 与摘要；需长期复核的代码快照导出为持久 Git bundle。
 
-审核定义统一进入 Git。执行与必要检查完成后冻结审核输入，各 Gate 报告作为审核输出保存；补测或修改成果需要新 Attempt。
+审核定义统一进入 Git。Workflow 与 Node 的必要检查累积，同一 Attempt 默认最多修复并重检 2 次；完成后冻结成果输入。执行失败或成果拒绝交给独立错误 Gate，决定重试、修复上游、等待或停止；默认人工，每个 Run 最多自动恢复 3 次。恢复获准不代表成果被接受，补测或修改冻结成果需要新 Attempt。
 
 只改变运行档案不会使运行输入失效。交付前对比 source_commit 与最新 main，排除 `.facetloom/runs/` 后有代码或定义变化则创建新 Run；交付提交保留最新档案。
 
@@ -68,7 +69,7 @@ Refinement 的界面入口为「运行精炼」，CLI 为 `facetloom refine`。�
 
 - 两个包含分支与汇聚的 Facet，生成并校验 Combination DAG。
 - 单 clone Runtime 的并行、Checkpoint、本地恢复及不同 clone 的档案协作。
-- 四种 Gate 模式、Node 策略继承与全部批准规则；最终集成检查及人类交付确认；Worker 不持有 main 推送凭据。
+- 四种 Gate 模式、Node 成果全部批准规则与 Workflow 错误处置；最终集成检查及人类交付确认；Worker 不持有 main 推送凭据。
 - 最小 WebUI / CLI：DAG、Diff、日志、审核、运行精炼。
 
 首个场景为“登录失败五次后暂时限制登录，并显示剩余等待时间”。当前仓库以设计文档为主，CLI、WebUI 与上述协议是实现目标；安装和部署方式在实现阶段确定。

@@ -7,7 +7,7 @@
 | 00 | 本文 | 系统边界、对象关系和存储位置 |
 | 01 | [Workflow](01-workflow.md) | Facet、Node、Combination 与组合 DAG |
 | 02 | [Requirement](02-requirement.md) | 需求版本、运行对象和状态推进 |
-| 03 | [Governance](03-governance.md) | 四种 Gate 模式、操作边界与 Refinement |
+| 03 | [Governance](03-governance.md) | 成果审核、错误处置、四种模式与 Refinement |
 | 04 | [Execution](04-execution.md) | 上下文、Checkpoint、证据与交付 |
 | 05 | [Services](05-services.md) | Runtime、Git、容器与 Agent 的职责 |
 | 06 | [WebUI](06-user-interface.md) | 查看运行、审核成果、精炼记录 |
@@ -46,14 +46,15 @@ Workflow 按 Facet 声明顺序从外到内应用 DAG 节点替换积，例如 `
 | Combination / DAG Snapshot | 固定的业务执行图 | 本地运行状态；发布到 main |
 | WorkflowRun / CombinationRun / Attempt | 一次运行、一个节点及一次尝试的状态 | 本地持久化；关键节点发布精简档案到 main |
 | Context Snapshot / Checkpoint | 固定一次尝试的输入与代码结果 | 本地；发布证据时附持久引用 |
-| GateReport / GateDecision | 每项 Gate 的评估证据与人类、AI 或程序决策 | main 的运行档案 |
+| ErrorRecord | 准备、执行或成果拒绝的不可变错误材料 | main 的运行档案 errors/ |
+| GateReport / GateDecision | 成果审核或错误处置的证据与决策 | main 的运行档案 |
 | IntegrationReport / DeliveryRecord | 最终检查与成功交付回执 | main 的运行档案 |
 | Refinement | 筛选记录、提出并落实改进的交互过程 | 本地会话；结果体现在 main 的修改与 Commit 描述 |
 | Runtime State | 队列、Worker、容器和未发布操作 | clone-local；SQLite 可选 |
 
-Context Snapshot 保存有效上下文清单，实际初始请求由 Attempt / GateReport 引用持久 Artifact。执行与必要检查完成后冻结审核输入；后续 Gate 报告是审核输出，不回写执行证据。审核定义统一由 source_commit 固定，本地只配置凭据、连接和资源上限。
+Attempt 先以 preparing 持久化，再形成输入和 Context Snapshot；准备失败也有可审核的错误记录。Context Snapshot 保存有效上下文清单，实际初始请求由 Attempt / GateReport 引用持久 Artifact。执行与必要检查完成后冻结审核输入；后续 Gate 报告是审核输出，不回写执行证据。审核定义统一由 source_commit 固定，本地只配置凭据、连接和资源上限。
 
-每个普通 Node 声明或继承一项 Gate：human、ai_assisted、ai、script。Combination 的各项独立审核同一固定输出，全部批准才接受成果；自动异常转交人类。最终代码交付仍需人类确认。
+每个普通 Node 声明或继承一项 Gate：human、ai_assisted、ai、script。Combination 的各项独立审核同一固定输出，全部批准才接受成果。无法执行或成果被拒绝时，由 Workflow 的独立错误 Gate 决定重试、修复上游、等待或停止；默认人工，自动恢复每个 Run 最多 3 次。处置决策不代表成果被接受。最终代码交付仍需人类确认。
 
 ## 单 main 与隔离执行
 
@@ -92,12 +93,15 @@ Git 分支只有 `main`。DAG 分支由独立 Worktree 执行；输入与 Checkp
 │   ├── contexts/<sha256>.yaml
 │   ├── combinations/<sha256>.yaml
 │   ├── attempts/<attempt-id>.yaml
+│   ├── errors/<error-id>.yaml
 │   ├── checkpoints/<checkpoint-id>.yaml
 │   ├── decisions/<decision-id>.yaml
 │   ├── reports/<report-id>.yaml           # GateReport / IntegrationReport
 │   └── deliveries/<delivery-id>.yaml
 └── .runtime/                             # 加入 gitignore
     ├── runs/<run-id>/                    # 完整状态、待发布记录
+    ├── transactions/<operation-id>/       # 事务清单、载荷与提交标记
+    ├── locks/
     ├── worktrees/<attempt-id>/
     ├── gate-tasks/<report-id>.yaml         # 活动评估、取消与恢复
     ├── logs/

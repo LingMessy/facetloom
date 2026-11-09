@@ -9,7 +9,7 @@
     ↓
 2. 单 clone 执行
     ↓
-3. 四种 Gate
+3. 成果与错误 Gate
     ↓
 4. 完整运行与交付
     ↓
@@ -22,7 +22,7 @@ CLI 随各阶段提供可操作的验证入口。每阶段完成验收后进入�
 
 **依赖：** 当前设计规范。
 
-**交付物：** Requirement 与 current.yaml、Workflow、Facet、Scope 和评估器定义的解析与校验；有序节点替换积、静态排除、旁路与传递约简、稳定 Combination ID 和 DAG 快照；CLI 定义校验与图预览。
+**交付物：** Requirement 与 current.yaml、Workflow、Facet、Scope 和评估器定义的解析与校验；有序节点替换积、静态排除、旁路与传递约简、稳定 Combination ID 和 DAG 快照；必要检查累积与独立错误策略校验；CLI 定义校验与图预览。
 
 **验收条件：**
 
@@ -33,36 +33,37 @@ CLI 随各阶段提供可操作的验证入口。每阶段完成验收后进入�
 
 **依赖：** 阶段 1 的有效定义与 DAG。
 
-**交付物：** WorkflowRun、CombinationRun、Attempt 的本地持久化；单 Worker 的 detached Worktree、容器隔离与 Agent Adapter；Context Snapshot、实际初始请求留存、Checkpoint 和持久 Artifact；单写入者的基础档案发布；CLI 启动和查看。
+**交付物：** WorkflowRun、CombinationRun、Attempt 的文件事务及崩溃重放；preparing 阶段与 ErrorRecord；单 Worker 的 detached Worktree、容器隔离与 Agent Adapter；Context Snapshot、实际初始请求留存、Checkpoint 和持久 Artifact；单写入者的基础档案发布；CLI 启动和查看。
 
 **验收条件：**
 
-- 根节点从固定输入执行到 waiting_gate；必要检查结束、请求和证据持久可读后才冻结审核输入并发布档案。
+- 根节点从 preparing 执行到成果 waiting_gate；Workflow 与 Node 检查累积，同次最多修复并重检 2 次，代码变化后全量重检；完整材料才冻结并发布。
 - 固定代码和证据可恢复、摘要可校验；执行失败、取消和材料发布失败可查询，不丢失待发布记录。
 - Worker 遵守路径、工具和凭据边界，无法直接写 main 或人类决策。
 
-## 3. 四种 Gate
+## 3. 成果与错误 Gate
 
 **依赖：** 阶段 2 已发布的固定成果与审核材料。
 
-**交付物：** human、ai_assisted、ai、script 评估；分项 GateReport 与 GateDecision；实际评估请求留存、人工接管与重评；CLI 审核和结果查询。
+**交付物：** human、ai_assisted、ai、script 的成果审核与错误处置；按 review_kind 区分的 GateReport 与 GateDecision；实际评估请求留存、人工接管与重评；CLI 审核和结果查询。
 
 **验收条件：**
 
 - 同一 Attempt 的各项 Gate 可并行审核，全部批准并发布后才接受成果；部分批准、AI 建议或评估故障均不能提前放行。
 - 拒绝、自动评估故障、人工接管、过期请求和迟到结果按设计处理；报告更新不改变冻结的审核输入。
-- 评估器故障可对原材料重评；补测或修改成果创建新 Attempt，全部 Gate 重新审核。
+- 评估器故障可对原材料重评；补测或修改成果经错误处置创建新 Attempt，全部成果 Gate 重新审核。
+- 执行失败和成果拒绝进入 Workflow 错误 Gate；恢复动作不直接接受成果，默认整个 Run 最多自动恢复 3 次，耗尽转人类。
 
 ## 4. 完整运行与交付
 
 **依赖：** 阶段 3 的分项决策与成果接受机制。
 
-**交付物：** DAG 并行调度、多前驱成果汇聚、重试与后继失效传播；Runtime 重启恢复；main 档案并发发布和 clone 协作；最终集成检查与交付回执；CLI 取消、重试、恢复和交付。
+**交付物：** DAG 并行调度、稳定排序、逐步基于真实共同祖先的多前驱汇聚、冲突清单、Scope 校验、受控重试与后继失效传播；Runtime 重启恢复；main 档案并发发布和 clone 协作；最终集成检查与交付回执；CLI 取消、重试、恢复和交付。
 
 **验收条件：**
 
 - 通过 CLI 跑通登录限制 Demo：分支并行、汇聚等待全部前驱、冲突处理、审核和最终交付。
-- 重启、推送失败和重复操作不丢记录、不重复接受或交付；不同 clone 的档案互不覆盖，bundle 可在另一 clone 恢复代码。
+- 事务提交前后崩溃、外部调用未知、推送失败和重复操作不丢记录、不重复扣减恢复额度、不重复接受或交付；不同 clone 的档案互不覆盖，bundle 可在另一 clone 恢复代码。
 - 需求取代与上游修复正确停止或失效相关执行；过期成果不能交付，仅档案变化不使运行输入失效。
 - 最终检查完成并经人类确认后交付 main，保留最新档案，能够从交付回执追溯需求、成果和验证。
 
@@ -70,7 +71,7 @@ CLI 随各阶段提供可操作的验证入口。每阶段完成验收后进入�
 
 **依赖：** 阶段 4 的完整运行能力与真实运行档案。
 
-**交付物：** Requirement、Workflow/DAG 预览、运行状态、Diff、证据、Gate 和交付页面；运行精炼的记录筛选、建议、采纳、验证与清理；精炼 CLI。界面与 CLI 使用相同服务和校验规则。
+**交付物：** Requirement、Workflow/DAG 预览、运行状态、Diff、证据、成果审核、错误处置与双重预算、交付页面；运行精炼的记录筛选、建议、采纳、验证与清理；精炼 CLI。界面与 CLI 使用相同服务和校验规则。
 
 **验收条件：**
 

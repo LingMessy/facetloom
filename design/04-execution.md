@@ -10,12 +10,14 @@ sequenceDiagram
     participant GM as Git Manager
     participant W as Worker
     participant G as 各 Node 的 Gate
+    RT->>RT: 原子持久化 Attempt=preparing 与节点状态
     RT->>GM: 汇聚前驱输入，创建 Context Snapshot
-    RT->>RT: 原子持久化 Attempt=pending 与节点状态
+    GM-->>RT: 输入和上下文就绪；失败则创建 ErrorRecord
+    RT->>RT: 一次固定输入与 Snapshot，Attempt=pending
     RT->>RT: 保存 Adapter 组装的初始请求与 agent_input_ref
     RT->>W: 启动独立 detached Worktree 和容器，提交已保存请求
     RT->>RT: 持久化 Attempt=running
-    W->>W: Pre-Assess、执行与验证
+    W->>W: Pre-Assess、执行、必要检查及预算内修复重检
     W->>GM: 请求 Checkpoint
     GM-->>W: 本地输出 Commit
     W->>RT: Post-Assess、结果与证据
@@ -44,6 +46,7 @@ workflow_id: development
 combination_id: development/feature:login/layer:domain
 input_commit: <full-commit-oid>
 direct_predecessors: []
+input_merge_ref: null                 # 多前驱时引用汇聚清单 Artifact
 merge_conflicts: []
 scope_paths: [src/auth/**, test/auth/**]
 context:
@@ -92,7 +95,14 @@ execution:
   adapter: codex
   environment_digest: sha256:<digest>
   tools: [test]
-  allowed_paths: [src/auth/**, test/auth/**]
+  read_paths: ["**"]
+  write_paths: [src/auth/**, test/auth/**]
+  checks:
+    - check_id: workflow/unit
+      argv: [pytest, -q]
+      timeout_seconds: 900
+      source_path: .facetloom/workflows/development.yaml
+  max_check_retries: 2
   network: disabled
 ```
 
@@ -101,17 +111,82 @@ execution:
 | 来源文件 | source_paths 和 reference_paths 均相对仓库根，由 source_commit 固定；不含运行档案 |
 | Node 与 Scope | 按 DAG members 解析，目标与约束合成，来源仍可追溯 |
 | 前驱输入 | direct_predecessors 各项固定 combination_id、attempt_id、output_commit |
-| 执行环境 | 固定 Adapter、工具、有效路径、网络和环境摘要；凭据只记录类别与用途 |
-| 修复要求 | 记录人类确认的修复/补测指令与原报告或决策的不可变引用；失败代码不会自动成为新输入 |
+| 执行环境 | 固定 Adapter、工具、独立的读写范围、检查列表及预算、网络和环境摘要；凭据只记录类别与用途 |
+| 修复要求 | 记录错误处置授权的修复/补测指令及原错误、报告和决定引用；失败代码不自动成为新输入 |
 | Gate 策略 | gates 按 Facet 声明顺序列出每个选中 Node 的 gate_id、完整有效 policy 与 policy_digest；缺项、重复项或来源不匹配时拒绝启动 |
 
-`policy.context.objectives` 按 Workflow → Node 顺序累积目标，其他约束和资料同样累积并保留来源；任务上下文仍作为共同审核输入。`policy.evaluator` 保存完整有效配置，不能只有 ID 或摘要。审核指令、模型、参数、脚本及环境定义统一来自 source_commit；本地只提供凭据、连接和资源上限，无法满足固定配置时阻塞。
+`policy.context.objectives` 按 Workflow → Node 顺序累积目标，其他约束和资料同样累积并保留来源；任务上下文仍作为共同审核输入。`policy.evaluator` 保存完整有效配置，不能只有 ID 或摘要。审核指令、模型、参数、脚本及环境定义统一来自 source_commit；本地只提供凭据、连接和资源上限，无法满足固定执行配置时进入错误 Gate；评估器自身故障则人工接管。
 
 `policy_digest` 对 policy 按 RFC 8785（JCS）规范化后的 UTF-8 JSON 字节求 SHA-256；仅允许该规范支持的 JSON 值。Decision / GateReport 的 gate_policy_digest 必须等于对应项摘要。Snapshot 文件名仍对完整 YAML 文件字节求摘要。任务输入变化需要新 Snapshot 与新 Attempt；Workflow、Node 或评估器定义变化需要新 Run。
 
-根节点以 source_commit 为代码基线。直接前驱均取自最终约简的 DAG 快照。单前驱可复用其有效输出 Commit；多前驱按 Combination ID 排序、去重输出 Commit 后合并，记录有序父提交列表。相同输入集合使用相同合并策略与工具版本生成相同 Tree；时间等元数据不要求产生相同 Commit OID。
+## 前驱代码汇聚
 
-文本冲突可在输入 Tree 中保存标记并列出路径，由汇聚 Worker 先解决；二进制或删改冲突记录冲突类型和各方内容引用。无法安全形成或解决输入时 Attempt failed、节点 blocked，等待人类处理；未解决冲突不能提交 Gate。
+根节点复用 source_commit；直接前驱取最终约简 DAG 快照中每个节点的当前有效输出。只有前驱全部 satisfied 才开始准备。
+
+```text
+有效前驱及来源映射
+    ↓ 按 Combination ID 排序
+Commit 去重 → 去掉被其他输入包含的祖先 Commit
+    ↓
+累积输入 M + 下一个前驱 H
+    ↓ 从真实历史计算共同祖先，执行三方合并
+候选 Tree + 冲突清单 → 保留 M、H 为父提交的临时 Commit
+    ↓ 重复至全部前驱合并
+固定 input_commit → Agent 解决全部冲突 → 执行与检查
+```
+
+### 确定性算法
+
+1. 保存所有前驱的 combination_id、attempt_id、output_commit。相同 OID 只参与一次计算，以字典序最小 Combination ID 作为排序键；祖先判定使用 Git 提交图，不比较 Tree。去重和祖先消除不能删除来源映射。
+2. 只有一个独立输入时直接复用，不创建空汇聚提交；多个输入按上述键升序折叠。
+3. 每一步使用 `git merge-tree --write-tree M H` 的 ort 三方合并。共同祖先由 Git 在双方真实历史中计算；多个最佳共同祖先由固定版本 Git 合成虚拟基线，不任意挑一个，不固定使用 source_commit。不允许无共同历史合并。
+4. 每步返回的候选 Tree 写成父提交为 `[M, H]` 的临时 Commit，供下一步计算祖先。临时提交的作者与提交者固定为 `FacetLoom <runtime@facetloom.local>`，时间固定为 `2000-01-01T00:00:00Z`，消息为 `facetloom input merge <step>`（末尾一个 LF，step 从 1 递增），保持同一输入 OID 集合的中间 OID 与冲突标签稳定；最终 input_commit 保留整个父链。
+5. Git 工具环境使用 run.yaml.merge_engine 的不可变环境，默认 Git 2.43.0、ort、conflict_style=merge、renames=true、rename_threshold=50%、rename_limit=0（不限制）、diff_algorithm=histogram。隔离用户/系统 Git 配置，禁用 rerere、外部合并驱动、过滤器和换行转换，不允许本地属性覆盖；仓库属性来自固定输入。完整有效参数进入清单，Run 内不切换环境。
+6. 退出码 0 为干净结果，1 为有冲突的候选结果，其他值为输入准备错误。缺失对象或共同历史、工具故障及不支持的合并能力进入错误 Gate。
+
+相同输入 OID、顺序和工具环境必须生成相同候选 Tree 与冲突清单。正式输入和 Checkpoint Commit 的时间等元数据不要求跨次 OID 相同。最终多个终端成果的交付汇聚使用相同算法；若有未解决冲突，保存 blocked IntegrationReport，不能在已 completed Run 内修改成果。
+
+### 冲突与输入清单
+
+每步冲突都累积保留，即使后续步骤对同一路径未报冲突，也不能自动删除旧冲突。文本候选保留 Git 冲突标记；二进制、重命名、删改及文件/目录冲突保留 Git 候选 Tree，并在清单列出所有涉及路径、类型、步骤、两侧提交、共同祖先以及各 stage 的 Blob OID / 模式，删除的一侧为 null。清单和需要的 Git 对象随 bundle 持久保存，不能只保留屏幕日志。
+
+~~~yaml
+schema_version: 1
+kind: input_merge
+predecessors: []              # 全部来源，包括去重或被包含的输入
+independent_heads: []         # 实际参与计算的有序 Commit
+engine: <run.yaml.merge_engine 的完整有效配置>
+steps: []                     # M、H、最佳共同祖先、候选 Tree、中间 Commit、冲突
+input_commit: <commit-oid>
+conflicts: []                 # 各步冲突并集，不自动标记已解决
+~~~
+
+清单作为不可变 Artifact，通过 Context Snapshot.input_merge_ref 引用。Agent 必须逐项给出解决结果与证据，Runtime 校验路径范围、Git 对象完整性以及无未合并 index 项；不能只用搜索文本标记判断二进制冲突是否解决。冲突未解决不能进入成果 Gate，但可以携带实际材料进入错误 Gate。
+
+汇聚 Agent 负责正常的代码集成冲突。冲突路径超出有效写入范围时在准备阶段报 permission_denied，不启动有越界权限的 Worker。Agent 判断问题来自前驱已批准行为与需求不对齐时，报 upstream_misaligned，引用具体前驱和证据，由错误 Gate 决定是否修复上游；不得静默更改上游责任。
+
+## 必要检查与同次修复
+
+Runtime 从 Workflow 和选中 Node 累积必要检查，将限定 ID、argv、超时、来源、环境和 max_check_retries 固定到 Snapshot。检查由 Runtime 调度并记录真实退出结果，Worker 自报通过不能替代检查记录。命令配置来自 source_commit；受信检查入口脚本从该 Commit 提供，不能被候选代码替换。被检查的实现和测试内容来自本轮候选 Tree。
+
+```text
+Agent 执行 / 解决冲突
+    ↓ 固定本轮候选 Tree
+全部必要检查
+    ├── 全部通过 → 最终 Checkpoint → 只读 Post-Assess → 冻结成果材料
+    ├── 检查失败且还有额度 → 同一 Worker 修复 → 全量重检
+    ├── 额度耗尽且证据完整 → 最终 Checkpoint → 只读 Post-Assess → 成果 Gate
+    └── 无法执行或材料缺失 → ErrorRecord → 错误 Gate
+```
+
+- 默认先检查一次，失败后最多修复并重检 2 次；max_check_retries=0 时首轮之后直接提交完整结果。
+- 每轮按有效列表顺序执行全部检查，不因首项失败跳过其余项。每项记录 check_id、round（从 1 开始）、evaluated_tree、passed / failed、退出码或 timeout、证据引用及使用环境。
+- 检查在该候选 Tree 的隔离副本运行，可写临时产物；不能把测试生成或修改的受跟踪文件带回成果。任何 Agent 代码修改都会使已有检查结果对新 Tree 失效，需要全量重检。
+- 已启动命令的非零退出或超时属于 failed 证据。命令无法启动、环境不可用或结果证据丢失属于执行错误，不用虚假 failed 结果补齐列表。
+- 修复轮次用尽后只允许对最终已检查 Tree 生成正式 Checkpoint；代码再变化必须新 Attempt。零项检查记录空清单，不能虚称有测试通过。
+- 每轮日志保存在 Artifact；精简档案保留最终 Tree、有效检查结论、修复次数及各轮证据引用。最终 Checkpoint Tree 必须等于最后一轮 evaluated_tree。
+
+检查修复预算只约束当前 Worker；错误 Gate 创建新 Attempt 或安排上游修复使用独立的 Run 级自动恢复额度。最终 integration.checks 仍须全部通过才可交付。
 
 ## 实际初始输入
 
@@ -146,7 +221,7 @@ Adapter 先组装并本地原子保存请求，再发送同一内容，不能事
 各 Gate 审核 → 分项报告与决策 → 全部批准
 ```
 
-进入 waiting_gate 前，Runtime 确认必要检查已结束、执行结论已形成、所有引用可读且摘要匹配。检查结束不等于检查通过；已有失败结论可作为固定证据交由 Gate 判断，但缺少必需材料不能开始正式审核。
+进入成果 waiting_gate 前，Runtime 确认全部必要检查有最终代码对应的结果、执行结论已形成、所有引用可读且摘要匹配。检查结束不等于检查通过；预算耗尽后的失败结论可以交由成果 Gate 判断。无法形成必要材料时创建 ErrorRecord，走错误 Gate。
 
 `review_input_digest` 为以下五个字段组成对象按 RFC 8785（JCS）规范化后的 UTF-8 JSON 字节的 SHA-256，格式为 `sha256:<hex>`：
 
@@ -166,7 +241,7 @@ Adapter 先组装并本地原子保存请求，再发送同一内容，不能事
 
 状态、时间及 gate_report_refs / gate_decision_refs 可继续推进，但不进入审核输入摘要。各 Gate 的报告、建议和决策理由是审核输出，不写回 output_refs，也不自动成为其他 Gate 的输入。评估请求、GateReport 和 GateDecision 都携带 review_input_digest；Runtime 重新计算并校验，不能仅相信记录中的摘要。
 
-缺少执行证据时 Gate 返回 Blocked / Escalated。人类若决定补测、重新执行或修改代码，先终止旧 Attempt，再按现有输入构造规则创建新 Attempt，全部 Gate 重新审核；不新增审核轮次或仅审核的 Attempt 类型。评估器故障可由人类请求对原固定材料重评；人类仅解释已有材料时，将理由记录在 Decision 中。
+缺少执行证据时成果 Gate 返回 Blocked / Escalated；Runtime 确认缺失后将旧 Attempt 置为 failed，通过 ErrorRecord 交由错误 Gate 决定是否新建 Attempt。成果拒绝同样转错误处置；全部成果 Gate 必须重新审核，不新增审核轮次或仅审核的 Attempt 类型。评估器故障可由人类请求对原固定材料重评；人类仅解释已有材料时，将理由记录在 Decision 中。
 
 ## Checkpoint 与代码保留
 
@@ -244,9 +319,9 @@ related_refs:
     digest: sha256:<file-bytes-digest>
 ```
 
-run_record 的路径相对对应运行目录，不得越出目录。Context Snapshot、Decision、Checkpoint 和 Report 引用的目标必须同 Commit 发布或已存在且内容匹配。清理时保留有效引用目标；仅当引用字段可更新时，才可先转换成删除前 Commit 的 git_file。不可变对象或 Attempt 的冻结字段仍被保留时，其依赖也保留。Attempt 用稳定 ID 关联；审核材料由 review_input_digest 校验，记录并发写入另用完整 Attempt 文件摘要。
+run_record 的路径相对对应运行目录，不得越出目录。Context Snapshot、ErrorRecord、Decision、Checkpoint 和 Report 引用的目标必须同 Commit 发布或已存在且内容匹配。清理时保留有效引用目标；仅当引用字段可更新时，才可先转换成删除前 Commit 的 git_file。不可变对象或 Attempt 的冻结字段仍被保留时，其依赖也保留。Attempt 用稳定 ID 关联；审核材料由 review_input_digest 校验，记录并发写入另用完整 Attempt 文件摘要。
 
-output_refs 在 waiting_gate 前可为空；waiting_gate 必须有且仅有一个 role: code 引用。outcome 为 changed、no_change 或 not_applicable；不适用结论须有可核对的理由，且经过该 Attempt 的全部 Gate。拒绝、失败或取消的输出不能满足后继。
+output_refs 在成果 waiting_gate 前可为空；Attempt 处于 waiting_gate 时必须有且仅有一个 role: code 引用。错误 Gate 不要求代码输出，使用独立 ErrorRecord。outcome 为 changed、no_change 或 not_applicable；不适用结论须有可核对的理由，且经过该 Attempt 的全部 Gate。拒绝、失败或取消的输出不能满足后继。
 
 ## 输入比较与集成交付
 

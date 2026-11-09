@@ -229,11 +229,11 @@ Post-Assess 检查是否遗漏相关变更、是否引入其他模块影响。Ga
 
 ## 5. Gate：对齐与验证
 
-Gate 持续检查组合成果是否符合人类需求、架构和功能行为。Gate 有 human、ai_assisted、ai、script 四种模式，分别由人类、人类、AI、程序决策。各项可以并行，异常暂停并交由人类处理；最终交付仍由人类确认。
+Gate 持续检查组合成果是否符合人类需求、架构和功能行为。Gate 有 human、ai_assisted、ai、script 四种模式，分别由人类、人类、AI、程序决策。成果项可以并行；执行失败或成果拒绝由 Workflow 错误 Gate 决定重试、上游修复、等待或停止，评估器自身故障交给人类。最终交付仍由人类确认。
 
 Requirement 不拥有独立 Gate；Verification Facet 表达节点级验证，最终集成检查验证整体结果。执行与必要检查完成后固定审核输入；Gate 报告属于审核输出，不回写执行证据。补测或修改成果需要新 Attempt，不能复用旧批准。审核定义统一进入 Git，执行与评估的实际初始请求通过持久 Artifact 留存。
 
-结果为 Approved、Rejected、Escalated、Blocked。拒绝可定位当前或上游 Combination；修复后相关后继重新评估。人类决策与运行结果在关键节点以精简档案发布 main。
+成果结论为 Approved、Rejected、Escalated、Blocked；错误处置单独输出动作，不把允许重试视为接受成果。修复后相关后继重新评估，决定与结果在关键节点以精简档案发布 main。
 
 ## 6. 上游回退：逻辑回退，而不是默认重写 Git
 
@@ -249,11 +249,11 @@ Login × Presentation  （C3）← Gate 发现领域设计错误
                  C2、C3 重新 Assess / 验证
 ```
 
-**默认策略**：Gate 指定目标 Combination Node，Workflow Runtime 重新启动该节点的 Combination Worker；Agent 基于固定输入**在隔离 Worktree 中创建新 Attempt 和 Commit**，历史结果保留作证据。
+**默认策略**：错误 Gate 决定重试当前节点或修复祖先，Runtime 在决定发布后安排新 Attempt；修复目标及全部后继失效，按依赖重新执行，历史结果保留为证据。
 
 **特殊策略**：如果设计方向需要整体放弃，可从旧检查点创建新的隔离 Worktree，保留原历史作参考；不默认执行破坏性的 `git reset --hard`。
 
-**尚待设计**：回退后哪些组合必须重新执行。最简单的第一版规则是从受影响组合向后重新 Assess；之后再依据显式依赖减少重跑范围。需要重试上限，避免无限来回。
+**恢复边界**：每个 Run 默认最多自动恢复 3 次，耗尽后由人类决定；同一 Attempt 内默认最多修复并全量重检 2 次，两者独立计数。精确影响分析和选择性重验证留待后续探索。
 
 ## 7. Git：正式内容与精简运行档案
 

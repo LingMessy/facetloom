@@ -57,8 +57,16 @@ exclude:
 execution:
   agent: codex
   checkpoint: git-commit
+  checks:
+    - id: unit
+      argv: [pytest, -q]
+      timeout_seconds: 900
+  max_check_retries: 2
 gate:
   mode: human
+error_gate:
+  mode: human
+  max_auto_recoveries: 3
 integration:
   checks:
     - id: regression
@@ -73,8 +81,9 @@ integration:
 | name | 否 | 展示名称 |
 | facets | 是 | 按稳定顺序排列的 Facet 引用，至少一个 |
 | exclude | 否 | 静态排除规则，默认空列表 |
-| execution | 否 | Agent 与检查点策略；并发配置见 Services |
+| execution | 否 | Agent、检查点、必要检查和检查修复预算；并发配置见 Services |
 | gate | 否 | 每个普通 Node 继承的默认 Gate 策略 |
+| error_gate | 否 | Workflow 唯一的错误处置策略，独立于各 Node 的成果 Gate |
 | integration | 否 | 交付前运行的最终检查；格式见下文 |
 
 Facet 列表顺序定义从外到内的替换顺序：`F1 ▷ F2 ▷ ... ▷ Fn`。不是节点执行顺序。替换积结合，因此多 Facet 的分组不影响结果；但不能交换 Facet 顺序。至少一个 Facet；同一 Workflow 不得重复引用同一 Facet ID。
@@ -83,6 +92,10 @@ Facet 列表顺序定义从外到内的替换顺序：`F1 ▷ F2 ▷ ... ▷ Fn`
 | --- | --- | --- |
 | execution.agent | Runtime 配置 | Agent Adapter ID |
 | execution.checkpoint | git-commit | 当前只支持此值；代码输出以 Git Commit 保存 |
+| execution.checks | 空列表 | Workflow 必要检查；与选中 Node 的检查累积 |
+| execution.max_check_retries | 2 | 同一 Attempt 内修复并重检的最大次数，非负整数 |
+| error_gate.mode | human | 四种模式之一；evaluator、context 的格式同 gate，不继承成果 gate |
+| error_gate.max_auto_recoveries | 3 | 整个 Run 共享的自动恢复动作上限，非负整数 |
 | gate.mode | human | `human`、`ai_assisted`、`ai` 或 `script` |
 | gate.evaluator | 无 | source_commit 中的 AI / 脚本评估器 ID；自动评估必须提供匹配类型的配置 |
 | gate.context | 空 | 审核目标、约束与资料；与 Node 的审核上下文累积 |
@@ -91,11 +104,34 @@ Facet 列表顺序定义从外到内的替换顺序：`F1 ▷ F2 ▷ ... ▷ Fn`
 
 并发上限属于每个 clone 的 Runtime 配置，不属于 Workflow 语义。
 
+### 必要检查
+
+Workflow 的 `execution.checks` 提供默认检查，普通 Node 的 `execution.checks` 追加检查。每项含唯一 `id`、非空 `argv` 参数数组和正整数 `timeout_seconds`；ID 格式同 Node ID。允许省略或空列表。命令不经 Shell 展开。
+
+~~~yaml
+# Node 片段
+id: domain
+role: regular
+execution:
+  checks:
+    - id: boundaries
+      argv: [pytest, -q, test/auth/test_boundaries.py]
+      timeout_seconds: 120
+~~~
+
+有效检查按 Workflow → facets 声明顺序 → 各列表顺序累积，不能覆盖或移除。限定 ID 为 `workflow/<id>` 或 `<facet>/<node>/<id>`，同一声明者内部不能重复。`execution.max_check_retries` 仅在 Workflow 配置。修复、全量重检和证据规则见 [Execution](04-execution.md)。`integration.checks` 独立用于交付，不替代节点检查。
+
+### 错误 Gate
+
+每个 Workflow 只有一项错误 Gate，`gate_id = workflow/error`。它决定重试当前节点、修复祖先、等待或停止，不接受代码成果。省略 `error_gate` 时等同 `mode: human, max_auto_recoveries: 3`；其他模式要求匹配的 evaluator。审核上下文只取自身声明，不继承 Node Gate。
+
+启动 Run 时校验并把完整有效错误策略固定到 run.yaml，因此尚未形成 Context Snapshot 时也能处置错误。错误策略、成果策略、检查及引用无效时拒绝创建 Run，不调用错误 Gate 修复定义。协议见 [Governance](03-governance.md)。
+
 ### Node Gate 与组合审核
 
 每个选中 Node 为 Combination 贡献一项 Gate，标识为 `facet_id/node_id`。`mode` 和 `evaluator` 分别按 Node → Workflow 解析；模式最终缺省为 `human`。Node 未声明 `gate` 时完整继承默认配置。有效模式为 `human` 时不调用评估器，快照中的 evaluator 为 null；其他模式缺少评估器或类型不匹配时校验失败。
 
-Workflow 与 Node 的 `gate.context` 使用 `objective`、`constraints`、`references`，字段格式同任务 context。目标与约束累积，资料去重并保留声明来源；不按 Node 顺序覆盖，冲突时阻塞。资料路径相对各自声明文件解析，再固定到 source_commit。
+Workflow 与 Node 的 `gate.context` 使用 `objective`、`constraints`、`references`，字段格式同任务 context。目标与约束累积，资料去重并保留声明来源；不按 Node 顺序覆盖，运行准备时发现语义冲突则进入错误 Gate。资料路径相对各自声明文件解析，再固定到 source_commit。
 
 ~~~text
 Combination: feature:login × layer:domain
@@ -188,9 +224,10 @@ edges:
 | Node name | 否 | 展示名称 |
 | Node scope | 否 | scopes.yaml 中的 Scope ID |
 | Node context | 否 | 普通 Node 的目标、约束和资料引用 |
+| Node execution.checks | 否 | 追加必要检查；不允许覆盖 Workflow 的 Agent、检查点或重试预算 |
 | Node gate | 否 | 当前 Node 的审核模式、评估器与审核上下文；未声明字段继承 Workflow |
 
-Facet 和普通 Node 的 `context` 都是可选的，可包含 `objective`、`references` 和 `constraints`。`objective` 可省略，填写时必须是非空文本；Facet 的目标说明其共享上下文，Node 的目标说明该 Combination 的工作边界。`references` 是相对声明文件的资料路径列表，默认空；`constraints` 是约束文本列表，默认空。`start` / `end` 不得声明 `scope`、`context` 或 `gate`。
+Facet 和普通 Node 的 `context` 都是可选的，可包含 `objective`、`references` 和 `constraints`。`objective` 可省略，填写时必须是非空文本；Facet 的目标说明其共享上下文，Node 的目标说明该 Combination 的工作边界。`references` 是相对声明文件的资料路径列表，默认空；`constraints` 是约束文本列表，默认空。`start` / `end` 不得声明 `scope`、`context`、`execution` 或 `gate`。
 
 Scope 示例文件 scopes.yaml：
 
@@ -203,7 +240,7 @@ mappings:
     paths: [src/shared/**]
 ~~~
 
-scope.mapping 是相对 Facet 文件解析的路径。每个 scope_id 在该文件中唯一，Node 的 scope 必须能解析到一个 mapping。paths 是仓库相对 POSIX glob；禁止绝对路径、空路径和包含 .. 的路径。未声明 Scope 的 Node 没有额外路径范围。
+scope.mapping 是相对 Facet 文件解析的路径。每个 scope_id 在该文件中唯一，Node 的 scope 必须能解析到一个 mapping。paths 是仓库相对 POSIX glob：`*` 和 `?` 不跨 `/`，`**` 可跨目录，支持字符集合，不支持否定规则；禁止绝对路径、空路径和包含 .. 的路径。范围交集按每个实际路径同时满足各组匹配条件判断，不对 glob 字符串求交集。未声明 Scope 的 Node 没有额外路径范围。
 
 Node 列表顺序只用于稳定表示，不是依赖。每张 Facet DAG 必须满足：
 
@@ -211,7 +248,7 @@ Node 列表顺序只用于稳定表示，不是依赖。每张 Facet DAG 必须�
 - 所有普通 Node 都位于 start 到 end 的路径上；
 - 图无环，无自环、重复边或悬空端点。
 
-Scope 用于解释某个 Node 可关联的项目路径，不会自行授予文件访问权。实际访问由 Runtime 的文件、工具和容器配置限制。
+Scope 约束代码写入，不授予额外访问权。读取项目、依赖和资料受 Runtime 读取策略限制，不取各 Node Scope 的交集。
 
 Workflow 的 Facet 引用相对 Workflow 文件解析；Facet 和 Node 的资料引用相对 Facet 文件解析。路径经规范化并解析符号链接后不得越出仓库。Workflow、Facet、Node 和 Scope 的 ID 使用 `[A-Za-z0-9][A-Za-z0-9_-]*`，避免与路径、Combination ID 分隔符混淆。
 
@@ -229,11 +266,13 @@ flowchart LR
     G[各 Node 的有效 Gate 策略与审核上下文] --> C
 ~~~
 
-引用资料保留来源并按内容去重；目标和约束累积，不按列表顺序覆盖。约束冲突时阻塞并请求评估。一个 Scope 内的路径取并集，各选中 Node 的 Scope 之间取交集；未声明 Scope 不增加限制。最终读写范围还须与 Runtime 配置允许的路径取交集。
+引用资料保留来源并按内容去重；目标和约束累积，不按列表顺序覆盖。约束冲突进入错误 Gate。一个 Scope 内的路径取并集，各选中 Node 的 Scope 之间取交集；未声明 Scope 不增加限制。有效写入范围再与 Runtime 写入策略取交集，读取范围单独由 Runtime 决定。
+
+空交集表示只读，允许有证据的 no_change 或 not_applicable；需要修改则报错，不自动扩权。Runtime 校验新增、删除、文件模式、重命名两端和符号链接目标，禁止通过路径或链接越界。自动汇聚已接受前驱的变更不受当前节点 Scope 重新裁剪；Agent 对汇聚输入的新增修改仍受约束。冲突路径必须全部在有效写入范围内，否则进入错误 Gate。
 
 Snapshot 保存有效输入清单，Adapter 实际发送的初始上下文另通过 Attempt.agent_input_ref 留存，规则见 [Execution](04-execution.md)。执行、必要测试和 Post-Assess 完成后冻结审核输入，再启动各项 Gate。
 
-动态 Applicability 和 Pre-Assess 在 Attempt 中执行，不改变组合 DAG。Applicability 明确为不适用时，Attempt 必须保存理由和证据；无法判断时阻塞，不能默认跳过 Workflow 要求的验证。
+动态 Applicability 和 Pre-Assess 在 Attempt 中执行，不改变组合 DAG。Applicability 明确为不适用时，Attempt 必须保存理由和证据；无法判断时进入错误 Gate，不能默认跳过 Workflow 要求的验证。
 
 ## 组合 DAG 的生成规则
 

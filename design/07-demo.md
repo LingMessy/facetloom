@@ -19,6 +19,15 @@ Workflow 按 `feature ▷ layer` 生成组合图，静态排除 notification × 
 exclude:
   - feature: [notification]
     layer: [application]
+execution:
+  checks:
+    - id: unit
+      argv: [pytest, -q, test/auth]
+      timeout_seconds: 120
+  max_check_retries: 2
+error_gate:
+  mode: human
+  max_auto_recoveries: 3
 integration:
   checks:
     - id: regression
@@ -98,17 +107,23 @@ execution:
 
 1. 人类审阅并在 main 发布 Requirement r1、current、Workflow、Facet 和审核评估器定义。
 2. Runtime 固定 source_commit，生成 DAG，先本地持久化，再发布初始精简档案。代码仍未变。
-3. Runtime 为根节点创建 Attempt，Adapter 组装并保存实际初始请求和 agent_input_ref，再启动独立 Worker 并发送原请求。
-4. 完成必要测试、Checkpoint 与 Post-Assess；验证初始请求、bundle 和执行证据持久可读，固定 review_input_digest，进入 waiting_gate 并发布 main。
+3. Runtime 先创建 preparing Attempt，再固定代码输入与 Context Snapshot 转 pending。Adapter 保存实际初始请求和 agent_input_ref，再启动 Worker 并发送原请求。准备失败直接保存 ErrorRecord，不伪造输入。
+4. 执行 Workflow 与 Node 累积的必要检查，失败时同一 Worker 最多修复并全量重检 2 次；最终 Tree 对应的完整结论形成后生成 Checkpoint 与 Post-Assess；验证初始请求、bundle 和执行证据持久可读，固定 review_input_digest，进入 waiting_gate 并发布 main。
 5. Runtime 并行调度各项 Gate，调用前保存实际评估请求，报告通过 request_input_ref 引用。各项报告只作为审核输出发布，不改写执行证据；全部批准和关联状态发布成功后，后继才可执行。
-6. application 与 data 并行，presentation 汇聚输入。若 Gate 发现缺少锁定到期后的恢复行为并拒绝成果，当前节点 blocked；人类确认修复 domain 后，将其及相关后继标为 stale，再重新执行。
+6. application 与 data 并行，presentation 按稳定顺序三方汇聚，Agent 解决范围内冲突。若成果 Gate 发现缺少锁定到期恢复行为而拒绝，Attempt rejected，节点转错误处置。人类在错误 Gate 选择 repair_upstream，目标为 domain；决定发布后 domain 及其后继 stale，再按依赖重新执行。
 7. 所有节点 satisfied，Run completed。summary 记录结果、返工原因和待改进问题；完成不等于已经交付。
 8. 另一个 clone 此时发布自己的 Run 档案。main 头变化，但 project_tree 不变，当前运行仍可交付。
 9. Git Manager 在最新 main 上构造代码候选，保留全部最新档案，运行最终检查；人类确认后提交代码，并追加 DeliveryRecord。
 
 如果第 8 步发生的是正式代码或定义变化，交付要求新 Run；同步到 r2 时取消旧版未终态运行，旧成果不能交付。
 
-审核过程中，如果脚本 Gate 检查失败，它返回 Rejected，整个 Attempt 被拒绝；无需给已批准的 AI Gate 增加一轮审核。如果缺少 Worker 应提供的测试报告，则暂停等待人类处理；决定补测后终止旧 Attempt，按原输入构造规则新建 Attempt 并重新审核全部 Gate。评估器单纯超时可对原固定材料重评。
+脚本成果 Gate 返回 Rejected 时停止原 Attempt 的其余评估，并交给错误 Gate；已批准项不在旧 Attempt 上重开审核。确认缺少必需测试材料时，Attempt failed，通过错误处置安排补测的新 Attempt，所有成果 Gate 重新审核。评估器单纯超时保留原材料，由人类接管或请求重评。
+
+### 自动恢复示例
+
+将 error_gate 配置为 ai 或 script 并提供匹配评估器：输入准备失败后，评估器可决定 retry_current；Runtime 在一个事务中记录动作、递增 auto_recoveries_used 和待发布意图。发布成功后启动新 Attempt。整个 Run 第 3 次自动恢复后再发生问题时，继续恢复须人类决定，不因节点切换或 Runtime 重启重置额度。
+
+检查次数耗尽但最终 Tree 和失败结果完整时，进入成果 Gate；检查无法启动或证据缺失时，进入错误 Gate。Scope 外冲突不自动扩权；Agent 发现前驱需求不对齐则引用前驱和证据报错。错误 Gate 的恢复动作始终不能直接解锁后继。
 
 ## 从记录到改进
 
@@ -133,11 +148,12 @@ main
 ├── 项目代码、Requirement、Workflow、Facet
 └── .facetloom/runs/<run-id>/
     ├── run.yaml / summary.md / dag.yaml
-    ├── contexts/ / combinations/ / attempts/
+    ├── contexts/ / combinations/ / attempts/ / errors/
     └── checkpoints/ / decisions/ / reports/ / deliveries/
 
 本地 .runtime/
 ├── 活动状态、待发布操作和 detached Worktree
+├── transactions/<operation-id>/ / locks/
 ├── 完整日志
 └── refinements/<id>/
 
@@ -155,21 +171,21 @@ main
 | 排除中间 Combination | 统一补边后传递约简，保持剩余节点间原有可达关系 |
 | 无 exclude 但存在冗余边 | 同样进行传递约简，调度与汇聚使用最终直接前驱 |
 | 改变节点、边及补边遍历顺序 | 最终边集与 DAG 摘要一致 |
-| Runtime 重启、Worker 丢失 | 本地对账；无法恢复则 blocked，人工确认重试 |
+| Runtime 重启、Worker 丢失 | 先重放文件事务再对账；无法恢复则 failed，保存错误并进入错误 Gate |
 | 不同 Run 同时推送 | 刷新后自动追加，互不覆盖 |
 | Node 未声明 Gate / 仅声明部分字段 | 继承 Workflow 默认，mode 缺省 human；审核上下文累积且可追溯 |
 | human / ai_assisted / ai / script | 分别由人类、人类、AI、程序决策；AI 建议本身不算批准 |
 | 自动模式缺少或错配评估器 | 校验失败，不使用本地替代定义 |
-| clone 无法满足固定模型、工具或环境 | 阻塞，不静默切换配置 |
-| 必要测试未结束或引用未持久化 | 不进入正式审核 |
+| clone 无法满足固定模型、工具或环境 | 执行错误进入错误 Gate；评估器故障人工接管，不静默切换 |
+| 必要测试未结束或引用未持久化 | 不进入成果审核；失败保存实际错误，发布不可用时保留本地操作 |
 | 实际初始请求留存 | 发送前本地保存；通过持久引用读取并校验字节摘要 |
 | 评估请求未形成就失败 | error 报告允许 request_input_ref 为 null，说明原因 |
 | 修改冻结字段或替换引用内容 | 审核输入/内容摘要校验失败，不能发布决策 |
 | 仅更新分项报告、决策或状态 | review_input_digest 不变，其他独立审核仍有效 |
 | Gate 检查失败 | 报告属于审核输出，可拒绝成果，不回写 output_refs |
-| 审核中发现缺少执行证据 | Blocked / Escalated；补测需人类确认新 Attempt，全部重新审核 |
+| 审核中确认缺少必需执行证据 | 原 Attempt failed，错误 Gate 决定是否新建 Attempt 补测；全部成果 Gate 重新审核 |
 | 多项 Gate 混合并行、部分批准 | 仍 waiting_gate；全部批准发布后才 satisfied |
-| 任一 Gate 拒绝 | Attempt rejected，其余活动评估取消；迟到批准不生效 |
+| 任一成果 Gate 拒绝 | Attempt rejected，取消其余成果评估，创建 ErrorRecord 转错误 Gate；迟到批准不生效 |
 | 超时、非零退出、无效结果或无法判断 | 保存故障/升级证据，暂停该项等待人类处理，不自动通过或拒绝 |
 | 人类接管自动项 | 记录原因和原证据，决策主体为 human，原策略保留 |
 | 另一 Gate 并发提交 / 当前项过期 | 前者复核固定材料后合并；后者拒绝过期请求 |
@@ -182,3 +198,22 @@ main
 | 部分采纳、验证失败、来源变化 | 保留待处理记录，必要时重新确认 |
 | 精炼清理或回退 | 历史可追溯，回退恢复记录，无悬空有效引用 |
 | Worker 尝试写 main 或人类决策 | 固定工具与凭据边界拒绝 |
+| 相同 Commit、多前驱祖先关系、输入顺序变化 | 去重及祖先消除，来源保留；稳定顺序得到相同候选 Tree |
+| 部分前驱共享历史并撤销改动 | 每步使用真实共同祖先，不重复应用或复活已撤销修改 |
+| 多个最佳共同祖先 | 固定 Git 的标准虚拟基线处理，不任意选择 |
+| 文本、二进制、删改、重命名及多方冲突 | 每步冲突和全部内容可恢复；后续干净合并不清除旧冲突 |
+| 范围内冲突 / 范围外冲突 / 上游需求错误 | 分别由汇聚 Agent 解决、错误 Gate 处置、带前驱证据请求上游修复 |
+| Scope 交集为空 | 只读；读取受 Runtime 策略限制，需要修改报错 |
+| Workflow 与 Node 声明同名检查 | 限定 ID 不冲突；检查累积，不能覆盖或移除 |
+| 检查失败并修复代码 | 默认最多 2 次修复；每次变更后全量重检，旧通过结果不复用 |
+| 最终检查失败但证据完整 / 命令无法启动 | 前者进入成果 Gate，后者进入错误 Gate |
+| preparing 阶段失败 | Attempt failed，输入和 Snapshot 可空，仍有不可变 ErrorRecord |
+| 四种错误 Gate 模式 | 复用模式和主体规则，输出动作而非成果批准 |
+| 错误决定允许重试或修复 | 发布后新建 Attempt，不能直接 satisfied；旧终态保留 |
+| 自动恢复达到 3 次、重启或跨节点重试 | Run 共享计数保持，不能超额安排自动恢复 |
+| 人工接管、wait 后继续、错误 Gate 自身故障 | 保留前一决定及依据；自身故障不递归处理 |
+| 重叠修复与迟到错误决定 | 已 stale、被替换或取消的节点拒绝旧动作 |
+| COMMITTED 前 / 后崩溃，APPLIED 前崩溃 | 分别丢弃暂存 / 重放完整事务；读取者不看到半状态 |
+| 已提交事务重复恢复 | 状态、恢复额度和动作 ID 只应用一次 |
+| Worker 启动或评估请求发送结果未知 | 按稳定 ID 对账，无法确认则人工处理，不自动重发 |
+| 推送成功但本地未确认、档案后来被精炼删除 | 通过操作 Trailer 对账历史，不重复恢复或复活档案 |

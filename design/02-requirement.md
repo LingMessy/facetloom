@@ -19,7 +19,7 @@ flowchart TD
     ALL --> CR
 ```
 
-一次 WorkflowRun 固定一个 Requirement Version、一个输入 Commit 和一份组合 DAG。每个业务 Combination 在该 Run 中最多有一条 CombinationRun；每次执行或重试都创建新的 Attempt。
+一次 WorkflowRun 固定一个 Requirement Version、一个输入 Commit 和一份组合 DAG。每个业务 Combination 在该 Run 中最多有一条 CombinationRun；每次节点级重试都创建新的 Attempt；同一 Worker 内的代码修复与检查重跑不新建 Attempt。
 
 ## Requirement Version
 
@@ -96,6 +96,9 @@ WorkflowRun 的必需字段如下：
 | `dag_digest` | 是 | `dag_snapshot_ref` 文件字节的 SHA-256 摘要；不是 Git Commit。 |
 | `owner_runtime_id` | 是 | 创建运行的 clone-local Runtime UUIDv4；标识本 Run 唯一调度和记录写入者。 |
 | `status` | 是 | WorkflowRun 当前状态。 |
+| `error_gate` | 是 | 完整有效错误策略及 `policy_digest`，含模式、完整 evaluator、审核上下文、来源路径和自动恢复上限；启动时固定。 |
+| `merge_engine` | 是 | Runtime 在创建 Run 时固定的 Git 版本、不可变环境引用及有效合并参数；结构见 Execution，Run 内不可切换。 |
+| `auto_recoveries_used` | 是 | 已安排的自动恢复动作次数，初始 0；与动作意图在同一事务递增，重启不重置。 |
 | `status_reason` | 条件 | `blocked` 或 `cancelled` 时的原因；结构见本节。 |
 | `delivery_abandonment` | 否 | 人类放弃未交付成果时记录 confirmed_by、非空 reason 和 confirmed_at；存在时不可交付。 |
 | `created_at`, `updated_at` | 是 | 创建及最近状态更新时间，使用 UTC ISO 8601。 |
@@ -103,11 +106,11 @@ WorkflowRun 的必需字段如下：
 启动流程：
 
 1. 获取 main 最新头，固定完整 OID 为 `source_commit`。
-2. 校验 current 指针、Requirement、Workflow、Facet、有效 Gate 策略、评估器配置和引用资料；拒绝引用运行档案作为定义或资料输入。
+2. 校验 current 指针、Requirement、Workflow、Facet、必要检查、成果及错误 Gate 策略、评估器配置和引用资料；拒绝引用运行档案作为定义或资料输入。
 3. 生成并校验 DAG，将 run.yaml、dag.yaml 和初始状态原子持久化到本地，再发布初始精简档案到 main。
 4. 再次同步检查 current 指针。需求已过期则取消；否则调度节点。仅运行档案的提交不影响固定输入。
 
-输入和 `owner_runtime_id` 创建后不变；状态、原因与更新时间可推进。main 的记录提交不能修改 `source_commit`。交付基线规则见 [Execution](04-execution.md)。
+输入、`error_gate`、`merge_engine` 和 `owner_runtime_id` 创建后不变；状态、原因与更新时间可推进。main 的记录提交不能修改 `source_commit`。交付基线规则见 [Execution](04-execution.md)。
 
 | 状态 | 定义 |
 | --- | --- |
@@ -146,6 +149,7 @@ stateDiagram-v2
 ├── contexts/<sha256>.yaml
 ├── combinations/<sha256>.yaml
 ├── attempts/<attempt-id>.yaml
+├── errors/<error-id>.yaml
 ├── checkpoints/<checkpoint-id>.yaml
 ├── decisions/<decision-id>.yaml
 ├── reports/<report-id>.yaml              # GateReport / IntegrationReport
@@ -154,7 +158,7 @@ stateDiagram-v2
 
 对象文件只保存身份、输入引用、状态、简短结论和证据引用，不复制完整对话或原始日志。summary.md 是人类阅读的入口，列出目标、结果、关键决策、验证和未解决问题。
 
-Context Snapshot 按文件字节 SHA-256 命名且不可原地修改。CombinationRun 文件名为 `combination_id` UTF-8 字节的 SHA-256 小写十六进制；Attempt、Checkpoint、Decision、Report 和 Delivery 使用各自 UUIDv4。读取时校验 ID、文件名、摘要和引用关系。
+Context Snapshot 按文件字节 SHA-256 命名且不可原地修改。CombinationRun 文件名为 `combination_id` UTF-8 字节的 SHA-256 小写十六进制；Attempt、ErrorRecord、Checkpoint、Decision、Report 和 Delivery 使用各自 UUIDv4。读取时校验 ID、文件名、摘要和引用关系。
 
 **Attempt 必须先在本地原子持久化，再启动 Worker。** 发布节点将关联状态与证据作为一个 main Commit 写入，Git 保留此前已发布状态；不要求每次内部状态变化都提交。其它 clone 同步后看到的是档案，不是活动 Worker 的恢复状态。
 
@@ -175,114 +179,134 @@ dag_snapshot_ref: .facetloom/runs/5f6e9c6e-2ee9-4f17-9c75-87234be8e4ba/dag.yaml
 dag_digest: sha256:7d9a...
 owner_runtime_id: 7a93f6e2-5e63-4431-aec9-502b910cc114
 status: pending
+error_gate:
+  policy:
+    mode: human
+    evaluator: null
+    context: {objectives: [], constraints: [], reference_paths: []}
+    source_paths: [.facetloom/workflows/development.yaml]
+    max_auto_recoveries: 3
+  policy_digest: sha256:<policy-digest>
+merge_engine:
+  git_version: "2.43.0"
+  environment_ref: <immutable-environment-ref>
+  environment_digest: sha256:<digest>
+  strategy: ort
+  options: {conflict_style: merge, renames: true, rename_threshold: 50, rename_limit: 0, diff_algorithm: histogram}
+auto_recoveries_used: 0
 created_at: "2026-11-04T12:00:00Z"
 updated_at: "2026-11-04T12:00:00Z"
 ```
 
 ## CombinationRun
 
-CombinationRun 是一个业务 Combination 在某个 WorkflowRun 中的状态记录，唯一键为 `(run_id, combination_id)`。每个 DAG 业务节点至多一个 CombinationRun；`start` 和 `end` 控制节点没有运行记录。CombinationRun 可按需创建，尚未创建的节点等同 `pending`。只有所有业务直接前驱均为 `satisfied` 的节点可进入执行；控制节点 `start` 视为已满足。WorkflowRun 取消时，尚未满足的节点进入 `cancelled`；已经 `satisfied` 的记录保留为历史。
+CombinationRun 是一个业务 Combination 在某个 WorkflowRun 中的状态记录，唯一键为 `(run_id, combination_id)`。每个业务节点至多一条，控制节点不创建记录；尚未创建等同 pending。只有全部业务直接前驱 satisfied 时可准备执行；start 视为已满足。
 
 ```mermaid
-flowchart LR
-    pending --> running
-    pending --> blocked
-    pending --> cancelled
+stateDiagram-v2
+    [*] --> pending
+    pending --> running: 创建 preparing Attempt
+    running --> waiting_gate: 成果或错误材料已冻结
+    waiting_gate --> satisfied: 成果全部批准并发布
+    waiting_gate --> pending: 发布重试决定
+    waiting_gate --> blocked: 错误处置选择等待
+    blocked --> waiting_gate: 请求重新处置原错误
+    satisfied --> stale: 修复祖先或自身
     pending --> stale
-    running --> waiting_gate
-    running --> blocked
     running --> stale
-    running --> cancelled
-    waiting_gate --> satisfied
-    waiting_gate --> blocked
     waiting_gate --> stale
-    waiting_gate --> cancelled
-    blocked --> pending
     blocked --> stale
-    blocked --> cancelled
-    satisfied --> stale
-    stale --> pending
-    stale --> cancelled
+    stale --> pending: 已授权修复且前驱重新满足
 ```
+
+Run 取消时停止活动任务，未满足节点转 cancelled；已经 satisfied 的记录保留历史。任何非 cancelled 状态都可能因 Run 取消而停止推进。
 
 | 字段 | 必填 | 定义 |
 | --- | --- | --- |
-| `schema_version` | 是 | CombinationRun 记录格式版本，当前为 `1`。 |
-| `run_id` | 是 | 所属 WorkflowRun。 |
-| `combination_id` | 是 | DAG 中稳定的 Combination ID。 |
-| `status` | 是 | 当前节点运行状态。 |
-| `current_attempt_id` | 否 | 当前活动 Attempt，或最近一次用于决定当前状态的 Attempt；尚未执行时为空。 |
-| `accepted_attempt_id` | 否 | 当前有效且已接受的 Attempt；仅 `satisfied` 时非空。 |
-| `status_reason` | 条件 | `blocked`、`stale` 或 `cancelled` 时的原因。 |
-| `updated_at` | 是 | 最近状态更新时间，使用 UTC ISO 8601。 |
-
-CombinationRun 文件示例：
+| schema_version | 是 | 记录格式，当前为 1 |
+| run_id、combination_id | 是 | 所属 Run 与 DAG 节点 |
+| status | 是 | 当前节点状态 |
+| current_attempt_id | 否 | 当前活动或最近决定节点状态的 Attempt |
+| accepted_attempt_id | 否 | 当前有效成果，仅 satisfied 时非空 |
+| active_error_ref | 否 | 当前待处置或等待条件的 ErrorRecord 类型化引用 |
+| error_report_ref、error_decision_ref | 否 | active_error_ref 对应的最新错误报告及决定；错误处理结束或输入失效时一并清空，历史对象保留 |
+| status_reason | 条件 | blocked、stale、cancelled 时必填 |
+| updated_at | 是 | UTC ISO 8601 |
 
 ```yaml
 schema_version: 1
-run_id: 5f6e9c6e-2ee9-4f17-9c75-87234be8e4ba
-combination_id: "development/feature:login/layer:domain"
+run_id: <run-id>
+combination_id: development/feature:login/layer:domain
 status: pending
 current_attempt_id: null
 accepted_attempt_id: null
-updated_at: "2026-11-04T12:00:00Z"
+active_error_ref: null
+error_report_ref: null
+error_decision_ref: null
+updated_at: "2026-11-09T12:00:00Z"
 ```
 
-同一 CombinationRun 同时最多有一个活动 Attempt。重试或重新评估创建新 Attempt，并更新 `current_attempt_id`；历史 Attempt 不覆盖。
-
-| 状态 | 定义 |
+| 状态 | 含义 |
 | --- | --- |
-| `pending` | 等待前驱、调度资源或重试。 |
-| `running` | 当前 Attempt 已创建，等待 Worker 启动或正在执行。 |
-| `waiting_gate` | 当前 Attempt 的结果等待 Gate 决策。 |
-| `satisfied` | 当前 Attempt 已按策略接受并登记结果，可满足后继依赖；成果由该 Attempt 的 `output_refs` 提供。 |
-| `blocked` | 当前不能自动继续；条件补齐后可重试。 |
-| `stale` | 评估上下文或已接受结果因输入、规则或上游变化失效；不可供后继使用，重新评估后回到 `pending`。尚未执行的后继也可能因依赖修复而进入此状态。 |
-| `cancelled` | WorkflowRun 取消后不再调度该节点。 |
+| pending | 等待前驱、调度资源或已批准的新尝试 |
+| running | 当前 Attempt 正在准备输入、等待 Worker 或执行 |
+| waiting_gate | 等待成果审核，或 active_error_ref 对应的错误处置 |
+| satisfied | accepted_attempt_id 的成果有效，可以满足后继 |
+| blocked | 错误 Gate 选择 wait，或等待人工接管及外部条件 |
+| stale | 因自身或祖先修复失效，不可作为后继输入 |
+| cancelled | Run 已取消，不再调度 |
+
+同一 CombinationRun 最多一个活动 Attempt；错误处置期间旧 Attempt 可以已经终态。新 Attempt 不能继承旧批准。no_change 和 not_applicable 也须完成必要检查与全部成果 Gate。
 
 ### 状态如何推进
 
-| 事件 | Attempt | CombinationRun |
+| 事件 | Attempt | CombinationRun / 后继 |
 | --- | --- | --- |
-| 开始执行 | 创建 `pending`，启动后为 `running` | `running` |
-| 执行与必要检查结束、材料持久化且摘要固定 | `waiting_gate` | `waiting_gate` |
-| 部分 Gate `Approved` | 保持 `waiting_gate` | 保持 `waiting_gate` |
-| 全部 Gate `Approved` 且发布成功 | `accepted` | `satisfied`，设置 `accepted_attempt_id` |
-| 任一 Gate `Rejected` | `rejected`，取消其余活动评估 | `blocked`；人类确认重试后回到 `pending` |
-| Gate `Escalated` / `Blocked` 或评估故障 | 保持 `waiting_gate`，保存报告或决策 | 保持 `waiting_gate`，等待人类处理该项；其余项可继续 |
-| 人类确认补测或修改冻结成果 | 未终态旧 Attempt → `cancelled`，已终态记录保留；创建新 Attempt | 按既有重试/修复规则推进 |
-| Worker 失败或丢失 | `failed` | `blocked`；人类确认重试后回到 `pending` |
-| 输入失效 | 活动 Attempt 变为 `cancelled` | `stale`，清空 `accepted_attempt_id` |
-| WorkflowRun 取消 | 活动 Attempt 变为 `cancelled` | 未满足节点为 `cancelled`，已满足节点保留历史 |
+| 前驱满足且获得调度资格 | 创建 preparing | running |
+| 输入与上下文准备完成 | pending；Worker 启动后 running | running |
+| 准备或执行失败 | failed，冻结 ErrorRecord | waiting_gate，设置 active_error_ref；后继不解锁 |
+| 成果、检查和证据完整 | waiting_gate，冻结成果输入 | waiting_gate；active_error_ref 为空 |
+| 成果 Gate 部分批准 | 保持 waiting_gate | 等待其他项 |
+| 成果 Gate 全部批准且发布成功 | accepted | satisfied，设置 accepted_attempt_id |
+| 任一成果 Gate Rejected | rejected，取消其余评估，创建 ErrorRecord | waiting_gate，转错误处置 |
+| 发现必需执行材料缺失，决定补测 | failed，保留已有审核记录，创建 ErrorRecord | waiting_gate，转错误处置；不修改冻结成果 |
+| 成果评估器故障或无法判断 | 保持 waiting_gate | 原项人工接管或重评，其他项可继续 |
+| 错误 Gate 选择 retry_current 并发布 | 旧终态不变，之后创建新 Attempt | pending，清空当前错误引用；后继仍等待 |
+| 错误 Gate 选择 repair_upstream 并发布 | 停止失效范围内活动 Attempt | 目标与全部后继 stale，按依赖重新执行 |
+| 错误 Gate 选择 wait / 自身故障或额度耗尽 | 旧终态不变 | blocked，保留错误引用与原因 |
+| 输入失效 | 活动 Attempt cancelled；终态保持 | stale，清空 accepted_attempt_id |
+| Run 取消 | 活动 Attempt cancelled；终态保持 | 未满足节点 cancelled；撤销活动评估 |
 
-`satisfied` 是唯一满足后继依赖的状态。有效成果只从 `accepted_attempt_id` 指向的 Attempt 读取；`no_change` 和 `not_applicable` 是执行结论，仍须经过验证和 Gate。
+只有 satisfied 满足后继依赖。恢复决定获准不等于接受成果；发布成功之前不能执行恢复动作。Run 还有可执行分支、活动 Worker 或自动错误处置时保持 running；没有可继续推进的工作且存在人工或外部等待时为 blocked。
 
 ### 重试与向上游修复
 
-~~~text
-Gate 拒绝并指定修复 domain
+```text
+准备/执行失败 或 成果拒绝
     ↓
-domain 及全部可达后继 → stale；停止其活动 Attempt
-    ↓
-domain → pending → 新 Attempt
-    ↓
-后继在各自前驱重新 satisfied 后依次进入 pending
-~~~
+不可变 ErrorRecord → Workflow 错误 Gate
+    ├── retry_current → 新 Attempt
+    ├── repair_upstream → 祖先及全部后继 stale → 按依赖新建 Attempt
+    ├── wait → blocked → 条件补齐后重新处置原错误
+    └── stop_run → 取消未结束运行
+```
 
-默认不自动重试；人类确认重试后创建新 Attempt。输入不变时可复用 Context Snapshot，但新 Attempt 的所有 Gate 必须重新审核；失败或拒绝的代码仅作为证据参考，不自动成为新输入。
+恢复动作必须引用错误决定。自动恢复预算按整个 Run 共享，默认 3 次；一次 retry_current 或 repair_upstream 各计一次，后者触发的后继重执行不另计。AI/脚本决定安排恢复时，Runtime 在同一事务中记录动作 ID、消耗额度和失效范围；重复重放不再扣减。额度耗尽只允许 wait 或 stop_run，继续恢复须人类决策。人工及 ai_assisted 人类确认的恢复不消耗自动额度，也不重置已有计数。
 
-审核中确认补测或修复时，未终态旧 Attempt 先取消，已终态记录保持原状态；新 Snapshot 写入人类确认的要求与原 Gate 报告/决策引用。新 Attempt 仍由根基线或当前有效前驱构造输入，不自动复用旧 Attempt 的代码输出。WorkflowRun 已终态时遵循新建 Run 规则。
+修复目标只能是当前节点的祖先；当前节点重试使用 retry_current。Runtime 原子清除修复目标和全部可达后继的有效成果引用，持久化停止意图，拒收迟到任务结果；无依赖分支继续。目标在其前驱满足后 pending，后继依次等待新成果。历史 accepted、rejected 和 failed Attempt 不改写。
 
-自动 Gate 的修复建议先阻塞当前成果，须经人类确认才安排修复。修复范围为目标节点加全部可达后继，未执行的后继也进入 `stale`；无依赖分支继续运行。目标必须是当前节点或其祖先。修复决定及原决策引用写入状态原因，并传入新 Context Snapshot。依赖再次满足后，Runtime 将已由人类确认的修复范围内的 `stale` 节点转回 `pending`。
+每个新 Attempt 仍按根基线或当前有效前驱构造输入；失败或拒绝的代码仅作显式证据，不自动成为输入。新 Snapshot 包含处置决定、修复要求与原错误引用。输入确实相同时可复用 Snapshot，但全部成果 Gate 重新审核。
+
+错误 Gate 不能修改 Requirement、Scope、执行定义或审核策略；此类变化发布后新建 Run。completed / cancelled Run 不重新打开；最终汇聚或交付失败保留 IntegrationReport，修改成果须新 Run。
 
 ### 状态原因
 
-三类运行对象都使用相同的 `status_reason` 结构，但必填状态不同：WorkflowRun 在 `blocked`、`cancelled` 时填写；CombinationRun 在 `blocked`、`stale`、`cancelled` 时填写；Attempt 在 `failed`、`cancelled` 时填写。Attempt 的 `rejected` 原因保存在对应 GateDecision 的 `rationale` 中。状态恢复后可清空当前原因；已发布原因由 Git 历史保留，未发布变化由本地状态与操作记录恢复。
+WorkflowRun 在 blocked / cancelled、CombinationRun 在 blocked / stale / cancelled、Attempt 在 failed / cancelled 时填写 status_reason。rejected 的原因见成果 GateDecision。状态恢复后可清空当前原因，已发布历史由 Git 保留。
 
 ```yaml
 status_reason:
   code: upstream_invalidated
-  message: domain 需修复，重新评估依赖它的结果
+  message: domain 需修复，重新评估其后继
   related_refs:
     - type: run_record
       run_id: <run-id>
@@ -290,99 +314,94 @@ status_reason:
       digest: sha256:<digest>
 ```
 
-`code` 是机器可读字符串，`message` 是非空说明，`related_refs` 使用 [Execution](04-execution.md) 的引用格式。原因码包括 `worker_lost`、`execution_failed`、`gate_rejected`、`gate_pending`、`upstream_invalidated`、`requirement_superseded`、`permission_denied`、`user_cancelled` 和 `input_conflict`。
+code 为机器可读字符串，message 非空，related_refs 使用 Execution 的类型化引用。常用码包括 preparation_failed、worker_lost、execution_failed、gate_rejected、gate_pending、upstream_invalidated、upstream_misaligned、requirement_superseded、permission_denied、input_conflict、recovery_budget_exhausted、error_gate_failed、user_cancelled。
 
 ## Attempt
 
-Attempt 是一个 Combination 的一次执行、重试或重新评估。每个 Attempt 隶属一个 CombinationRun；其 `attempt_id` 全局唯一，`attempt_number` 在该 CombinationRun 内从 1 递增。一次 Attempt 最多启动一个 Worker。
+Attempt 是一个 Combination 的一次尝试，涵盖准备、执行与成果审核。attempt_id 为全局唯一 UUIDv4，attempt_number 在 CombinationRun 内从 1 递增；最多启动一个 Worker。该 Worker 可以在检查预算内多次修复代码，不另建 Attempt。
 
 ```mermaid
 stateDiagram-v2
-    [*] --> pending
+    [*] --> preparing
+    preparing --> pending: 输入与上下文固定
+    preparing --> failed
     pending --> running
     pending --> failed
-    pending --> cancelled
-    running --> waiting_gate
+    running --> waiting_gate: 成果输入冻结
     running --> failed
-    running --> cancelled
     waiting_gate --> accepted
     waiting_gate --> rejected
+    waiting_gate --> failed: 确认缺失必需执行材料
+    preparing --> cancelled
+    pending --> cancelled
+    running --> cancelled
     waiting_gate --> cancelled
-    accepted --> [*]
-    rejected --> [*]
-    failed --> [*]
-    cancelled --> [*]
 ```
+
+accepted、rejected、failed、cancelled 为终态，不因错误处置重新打开。错误报告与决定属于 CombinationRun 的当前错误，不附加到旧 Attempt 的成果审核映射。
 
 | 字段 | 必填 | 定义 |
 | --- | --- | --- |
-| `schema_version` | 是 | Attempt 记录格式版本，当前为 `1`。 |
-| `attempt_id` | 是 | UUIDv4 Attempt ID；冲突时重新生成。 |
-| `run_id`, `combination_id` | 是 | 所属 WorkflowRun 和 Combination。 |
-| `attempt_number` | 是 | 该 CombinationRun 内从 1 递增的序号。 |
-| `context_snapshot_ref` | 是 | 运行档案内 `contexts/<sha256>.yaml` 的不可变路径，固定 Requirement、Workflow、组合上下文、前驱成果和执行限制。 |
-| `input_commit` | 是 | 必须等于 Context Snapshot 中的 `input_commit`；此 Attempt 的代码基线。 |
-| `agent_input_ref` | 条件 | 实际初始请求的 Artifact 引用；pending 时可为 null，启动 Agent 前赋值并固定，正式审核前验证持久可读。 |
-| `status` | 是 | 当前 Attempt 状态。 |
-| `outcome` | 条件 | 进入 waiting_gate 时填写 changed、no_change 或 not_applicable；执行失败可为空。 |
-| `summary` | 条件 | waiting_gate 或终态时的简短结果；not_applicable 必须说明理由。 |
-| `output_refs` | 是 | 带类型的不可变输出引用，初始为空；等待 Gate 时恰有一个 `role: code` 的 Commit 引用。格式见 [Execution](04-execution.md)。 |
-| `review_input_digest` | 条件 | waiting_gate 前生成并固定；对上下文引用、代码输入、执行结论、摘要及输出引用求 SHA-256，算法见 Execution。 |
-| `gate_decision_refs` | 是 | gate_id → `decisions/<decision-id>.yaml` 的映射，初始为空；每项指向该 Gate 的最新决策。 |
-| `gate_report_refs` | 是 | gate_id → `reports/<report-id>.yaml` 的映射，初始为空；保存最新建议、自动结果或故障报告。 |
-| `status_reason` | 条件 | `failed` 或 `cancelled` 时的原因。 |
-| `created_at` | 是 | 创建时间，使用 UTC ISO 8601。 |
-| `started_at`, `finished_at` | 否 | Worker 开始及 Attempt 进入终态的时间；尚未发生时为空。 |
-| `updated_at` | 是 | 最近状态更新时间，使用 UTC ISO 8601。 |
-
-Attempt 文件示例：
+| schema_version、attempt_id | 是 | 格式为 1，ID 为 UUIDv4 |
+| run_id、combination_id、attempt_number | 是 | 所属节点与本节点递增序号 |
+| context_snapshot_ref | 条件 | preparing 时可空；准备成功时固定为 contexts/<sha256>.yaml，按字节摘要校验 |
+| input_commit | 条件 | 与 context_snapshot_ref 一起设置一次，必须等于 Snapshot.input_commit，随后不可变 |
+| agent_input_ref | 条件 | 初始请求形成后设置一次，发送前固定；未形成请求可空 |
+| status | 是 | 当前 Attempt 状态 |
+| outcome | 条件 | 成果审核时为 changed / no_change / not_applicable；执行失败可空 |
+| summary | 条件 | waiting_gate 或终态必填；not_applicable 说明理由 |
+| output_refs | 是 | 初始为空；成果 waiting_gate 时恰有一个 role: code 引用及全部必要证据 |
+| review_input_digest | 条件 | 成果 waiting_gate 前固定，算法见 Execution；准备失败可空 |
+| gate_report_refs、gate_decision_refs | 是 | 成果 gate_id 到最新报告 / 决定引用的映射，初始空 |
+| status_reason | 条件 | failed / cancelled 必填 |
+| created_at、updated_at | 是 | UTC ISO 8601 |
+| started_at、finished_at | 否 | Worker 开始及 Attempt 进入终态的时间 |
 
 ```yaml
 schema_version: 1
-attempt_id: 57b6629a-2f49-4dbd-8652-3668de77e4bb
-run_id: 5f6e9c6e-2ee9-4f17-9c75-87234be8e4ba
-combination_id: "development/feature:login/layer:domain"
+attempt_id: <uuid>
+run_id: <run-id>
+combination_id: development/feature:login/layer:domain
 attempt_number: 1
-context_snapshot_ref: contexts/9a41....yaml
-input_commit: 8b8c0f1...
+status: preparing
+context_snapshot_ref: null
+input_commit: null
 agent_input_ref: null
-status: pending
 outcome: null
 summary: null
 output_refs: []
 review_input_digest: null
-gate_decision_refs: {}
 gate_report_refs: {}
-created_at: "2026-11-04T12:00:00Z"
-started_at: null
-finished_at: null
-updated_at: "2026-11-04T12:00:00Z"
+gate_decision_refs: {}
+created_at: "2026-11-09T12:00:00Z"
+updated_at: "2026-11-09T12:00:00Z"
 ```
-
-Attempt 身份、context_snapshot_ref 和 input_commit 在首次本地持久化后不可改。agent_input_ref 在 pending 阶段允许从 null 设置一次，发送前固定。outcome、summary、output_refs 和 review_input_digest 在进入 waiting_gate 时固定，此后不能追加或替换执行证据。
-
-Gate 映射键必须来自 Snapshot 的有效 Gate 列表，目标必须匹配同一 Attempt、gate_id、review_input_digest、上下文、策略和输出 Tree。审核期间只推进状态、时间及各项报告/决策引用，历史文件保留。补测或修改成果需要新 Attempt；评估器故障仅对原材料重评。`worker_ref` 是本地进程或容器引用，不写入 Git。
 
 | 状态 | 定义 |
 | --- | --- |
-| `pending` | Attempt 已固定输入，尚未启动 Worker。 |
-| `running` | Worker 正在执行。 |
-| `waiting_gate` | 执行结束且审核输入已冻结，等待各项 Gate 决策。 |
-| `accepted` | 所有 Gate 批准且发布成功，结果已登记为当前有效输出。 |
-| `rejected` | Gate 拒绝；结果保留为证据，不可用作后继输入。 |
-| `failed` | Worker 或执行基础设施失败。 |
-| `cancelled` | Attempt 被停止、取消或其运行已被废弃。 |
+| preparing | 已记录尝试身份，正在构造输入与上下文 |
+| pending | 输入固定，尚未启动 Worker |
+| running | Worker 执行及预算内修复重检 |
+| waiting_gate | 成果材料冻结，等待各 Node 审核 |
+| accepted | 全部成果 Gate 批准并发布，输出可登记为有效成果 |
+| rejected | 成果 Gate 拒绝，旧成果仅作证据 |
+| failed | 准备或执行失败，或确认必需执行材料缺失 |
+| cancelled | 尝试已停止或失效 |
 
-`accepted`、`rejected`、`failed` 和 `cancelled` 为终态。失效只撤销 CombinationRun 对成果的引用，不修改已结束 Attempt 的历史状态。
+身份创建后不变。preparing 中已形成的部分清单、输入构造结果及错误证据由本地操作记录和 ErrorRecord 引用；不分次改写半成品 Snapshot。准备失败不伪造 input_commit、Snapshot 或输出 Tree。
+
+进入成果 waiting_gate 时 outcome、summary、output_refs、review_input_digest 一并冻结；其引用内容不得追加或替换。审核映射键必须来自 Snapshot 的成果 Gate 列表，目标须匹配同一 Attempt、策略、摘要与输出 Tree。审核期间仅推进状态、时间、状态原因与成果报告/决定引用。
+
+worker_ref 属于本地状态，不写入 Git。新 Attempt 最多启动一个 Worker，无法对账的旧 Worker 先隔离或停止，再按错误决定恢复。
 
 ## 持久化与恢复
 
 | 情况 | 恢复方式 |
 | --- | --- |
-| 同一 clone 的 Runtime 重启 | 从本地状态、活动 Worktree 与容器标记对账；已发布决策从 main 确认 |
-| Worker 无法对账 | Attempt failed，CombinationRun blocked；人类确认后新建 Attempt |
-| main 推送失败 | 保留待发布操作；同步后校验并重试，不能重复接受或交付 |
-| 本地运行状态丢失 | main 可恢复已发布证据，不保证恢复未发布状态或活动 Worker；通常新建 Run |
-| 另一 clone 查看运行 | 读取 main 档案；代码复核从持久 bundle 恢复，不接管活动 Worker |
+| Runtime 重启 | 先恢复已提交文件事务，再对账 Worker、评估任务和待发布操作，最后恢复调度 |
+| Worker 无法对账 | Attempt failed，创建 ErrorRecord，按错误 Gate 决定恢复 |
+| main 推送失败 | 本地保留待发布操作；对账后重试，不提前解锁或重复恢复 |
+| 本地状态丢失 | 从 main 恢复已发布证据；不保证恢复未发布操作或活动 Worker，通常新建 Run |
+| 另一 clone 查看 | 读取 main 档案，从 bundle 恢复代码，不接管活动 Worker |
 
-Runtime 状态采用本地文件持久化，SQLite 可作缓存与索引；不是必需依赖，也不是共享事实来源。Git 只保证已发布档案可追溯。Refinement 清理后按历史 Commit 读取原证据，详见 [Governance](03-governance.md)。
+本地文件是恢复依据，SQLite 仅为可选索引和缓存。多对象事务、外部动作对账与崩溃恢复顺序见 [Services](05-services.md)；档案清理见 [Governance](03-governance.md)。
