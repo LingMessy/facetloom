@@ -37,10 +37,11 @@ CLI 随各阶段提供可操作的验证入口。每阶段完成验收后进入�
 
 **验收条件：**
 
-- 根节点从 preparing 执行到成果 waiting_gate；Workflow 与 Node 检查累积，同次最多修复并重检 2 次，代码变化后全量重检；完整材料才冻结并发布，CheckReport 最终 Tree 必须等于成果 Tree，三种 outcome 与代码条件一致。
+- 根节点从 preparing 执行到成果 waiting_gate；Adapter 解析原生 ExecutionResult，Runtime 按 Git Tree 判定 outcome；Applicability 不确定或结果格式无效进入错误 Gate。Workflow 与 Node 检查累积，同次最多修复并重检 2 次，代码变化后全量重检；独立只读 Post-AssessReport 与 CheckReport 均绑定最终 Tree，完整材料才冻结并发布。
 - 固定代码和证据可恢复、摘要可校验；执行失败、取消和材料发布失败可查询，不丢失待发布记录。
 - 在原生免审批模式下，Worker 仍受容器、Scope 和凭据边界约束，无法直接写 main 或人类决策。
 - Adapter 完成 probe/start/continue/stop；镜像、程序、参数、配置或认证失败可定位。检查由 Runtime 独立执行，修复通过原生会话续接；缺失能力明确报错。
+- Post-Assess 以新会话和只读候选容器执行，不另建 Worker；越权修改、超时或无效结果进入错误 Gate，`concerns` 作为证据交成果 Gate 审核。
 - runner 总时限覆盖执行、修复、检查与 Post-Assess；停止意图、30 秒默认宽限与实际退出分别持久化。
 
 ## 3. 成果与错误 Gate
@@ -53,6 +54,7 @@ CLI 随各阶段提供可操作的验证入口。每阶段完成验收后进入�
 
 - 同一 Attempt 的各项 Gate 可并行审核，全部批准并发布后才接受成果；部分批准、AI 建议或评估故障均不能提前放行。
 - 拒绝、自动评估故障、人工接管、过期请求和迟到结果按设计处理；报告更新不改变冻结的审核输入；外部程序成功退出但缺少有效结构化结论仍属故障。
+- Post-Assess 的 `concerns` 不自动拒绝成果；其故障与无效结构化输出可恢复或人工接管，不覆盖原始检查报告。
 - 评估器故障可对原材料重评；补测或修改成果经错误处置创建新 Attempt，全部成果 Gate 重新审核。
 - 执行失败和成果拒绝进入 Workflow 错误 Gate；恢复动作不直接接受成果，默认整个 Run 最多自动恢复 3 次，耗尽转人类。
 

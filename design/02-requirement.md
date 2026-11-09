@@ -369,9 +369,10 @@ accepted、rejected、failed、cancelled 为终态，不因错误处置重新打
 | input_commit | 条件 | 与 context_snapshot_ref 一起设置一次，必须等于 Snapshot.input_commit，随后不可变 |
 | agent_input_ref | 条件 | 初始请求形成后设置一次，发送前固定；未形成请求可空 |
 | status | 是 | 当前 Attempt 状态 |
-| outcome | 条件 | 成果审核时为 changed / no_change / not_applicable；执行失败可空 |
+| outcome | 条件 | Runtime 按 ExecutionResult 与 Git Tree 判定 changed / no_change / not_applicable；执行失败可空 |
 | summary | 条件 | waiting_gate 或终态必填；not_applicable 说明理由 |
-| output_refs | 是 | 初始为空；成果 waiting_gate 时恰有一个 role: code 引用，并引用最终 CheckReport 及其他必要证据 |
+| execution_result_ref | 条件 | 外部 Agent 最终有效 ExecutionResult 的 Artifact；准备失败或结构无效可空 |
+| output_refs | 是 | 初始为空；成果 waiting_gate 时恰有一个 role: code 引用，并引用最终 CheckReport、ExecutionResult、Post-AssessReport 及其他必要证据 |
 | review_input_digest | 条件 | 成果 waiting_gate 前固定，算法见 Execution；准备失败可空 |
 | gate_report_refs、gate_decision_refs | 是 | 成果 gate_id 到最新报告 / 决定引用的映射，初始空 |
 | status_reason | 条件 | failed / cancelled 必填 |
@@ -389,6 +390,7 @@ context_snapshot_ref: null
 input_commit: null
 agent_input_ref: null
 outcome: null
+execution_result_ref: null
 summary: null
 output_refs: []
 review_input_digest: null

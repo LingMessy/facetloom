@@ -8,7 +8,7 @@
 | --- | --- | --- |
 | GatePolicy | 模式、上下文和评估器配置 | 成果策略固定在 Context Snapshot；错误策略固定在 run.yaml |
 | ErrorRecord | 不可变错误材料及相关输入、前驱和证据 | main 的运行档案 errors/ |
-| CheckReport | Runtime 执行必要检查的轮次、Tree 与真实结果；不作审核决策 | main 的运行档案 reports/ |
+| CheckReport / Post-AssessReport | Runtime 实际检查结果与外部 Agent 只读自检报告；均不作 Gate 决策 | main 的运行档案 reports/ |
 | GateReport | AI 建议、自动评估结果或故障证据 | main 的运行档案 reports/；大日志使用 Artifact 引用 |
 | GateDecision | 某项成果审核或错误处置决定 | main 的运行档案 decisions/ |
 | Refinement | 人机筛选记录、落实改进的会话 | 本地 `.runtime/refinements/` |
@@ -40,7 +40,7 @@ flowchart LR
     P --> N[满足后继依赖]
 ```
 
-各项可并行，相同模式不自动合并。人类可以一次确认多项，但每项分别保存 Decision。Runtime 汇总全部结果，不增加一次额外总审核。Worker 的 Post-Assess 是自检证据；AI Gate 使用独立评审会话，不直接沿用执行会话的自我批准。
+各项可并行，相同模式不自动合并。人类可以一次确认多项，但每项分别保存 Decision。Runtime 汇总全部结果，不增加一次额外总审核。Post-Assess 是隔离的只读自检证据，不产生 Gate 决策；AI Gate 使用独立评审会话，不直接沿用执行会话的自我批准。
 
 ## 评估器与执行边界
 

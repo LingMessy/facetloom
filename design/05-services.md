@@ -239,11 +239,11 @@ Refinement 是 Runtime 提供的本地交互功能，不是独立共享审批服
 
 | 对象 | 含义 | 本地位置 |
 | --- | --- | --- |
-| Worker | 一个 Attempt 的容器、Worktree 和调用生命周期 | workers/<attempt-id>.yaml |
-| Invocation | 一次外部 CLI 启动或原生协议请求 | invocations/<invocation-id>.yaml |
-| Native session | 外部 Agent 自己维护的会话；ID 可为空 | 所属执行、审核或精炼任务的独立目录；Invocation 保存引用 |
+| Worker | 一个 Attempt 的 Worktree 和执行生命周期；可先后持有执行及 Post-Assess 容器 | workers/<attempt-id>.yaml |
+| Invocation | 一次外部 CLI 启动或原生协议请求，含 task_kind | invocations/<invocation-id>.yaml |
+| Native session | 外部 Agent 自己维护的会话；ID 可为空 | 每次任务独立目录；Invocation 保存引用 |
 
-一个 Attempt 最多创建一个 Worker；同一 Worker 可在预算内发起多个串行 Invocation，不能并行修改同一 Worktree。只有原生支持并能核实身份时才续接或恢复会话；续接失败进入错误 Gate。
+一个 Attempt 最多创建一个 Worker；同一 Worker 可在预算内发起多个串行 Invocation，不能并行修改同一 Worktree。Post-Assess 使用新的只读容器和会话，结束后回收该临时容器；不创建第二个 Worker。只有原生支持并能核实身份时才续接执行/修复会话；续接失败进入错误 Gate。Post-Assess 不续接执行会话。
 
 ~~~yaml
 schema_version: 1
@@ -253,7 +253,8 @@ attempt_id: <attempt-id>
 owner_runtime_id: <runtime-id>
 runner_id: developer
 runner_profile_digest: sha256:<profile-digest>
-container_id: <podman-container-id>
+execution_container_id: <podman-container-id>
+post_assess_container_ids: []
 status: running
 invocation_ids: [<invocation-id>]
 started_at: "2026-11-09T12:00:00Z"
@@ -272,20 +273,20 @@ Invocation 文件使用以下字段；AI Gate 和 Refinement 也共用此记录�
 | 字段 | 定义 |
 | --- | --- |
 | schema_version、invocation_id | 格式为 1，调用 ID 为 UUIDv4 |
-| owner | `{kind: worker/gate/refinement, id: <所属 ID>}`；Gate 使用 report_id |
+| owner、task_kind | owner 为 `{kind: worker/gate/refinement, id: <所属 ID>}`；task_kind 为 execute / repair / post_assess / evaluate / refine |
 | runner_id、runner_profile_digest | 所属 Run 或精炼会话内的固定调用配置 |
 | adapter_version、agent_version、image_ref | 实际 Adapter / Agent 版本及镜像 digest；程序尚未探测成功时版本可为 null |
-| argv、input_ref | 实际参数及发送前固定的输入 Artifact；不含凭据 |
+| argv、input_ref、result_ref | 实际参数、发送前固定的输入 Artifact 和结构化结果 Artifact；不含凭据 |
 | native_session_id、previous_invocation_id | 原生会话与上一调用；首次或原生不支持时可为 null |
-| container_id、process_identity | 容器及进程启动身份；启动前可为空 |
+| container_id、process_identity | 本次调用的容器及进程启动身份；启动前可为空 |
 | status | pending / running / stop_requested / succeeded / failed / cancelled / unknown；succeeded 只表示原生调用成功退出 |
 | started_at、deadline_at、finished_at | UTC ISO 8601；未开始或未结束的相应字段为 null，执行调用不得超出 Worker deadline |
 | stop_requested_at、stop_reason、stop_deadline_at | 持久化停止意图、原因与强制终止截止时间；无停止请求时为 null |
-| exit_code、event_refs、result_ref | 实际退出码、可观测事件与结果引用；未形成时为空 |
+| exit_code、event_refs | 实际退出码与可观测事件引用；未形成时为空 |
 
-续接只能引用同一任务、相同固定 runner 的原生会话；恢复时重新核实镜像、程序版本及 Adapter 兼容性，不能静默切换运行方式。
+续接只能引用同一 Attempt 的 execute / repair 调用、相同固定 runner 的原生会话；Post-Assess 不得复用可写执行容器或会话。恢复时重新核实镜像、程序版本及 Adapter 兼容性，不能静默切换运行方式。
 
-runner.timeout_seconds 从首次外部执行调用发出前持久化 started_at / deadline_at 开始计时，覆盖执行、同次修复、检查和只读 Post-Assess；排队、准备、Gate 等待和档案发布不计入。Runtime 重启不重置 deadline。达到总时限为 execution_timeout，取消正在进行的检查并保存实际结果，Attempt failed 后转错误 Gate；单个检查自身先超时仍按 CheckReport 的 failed 处理。AI 评估与精炼采用各自调用的时限。
+runner.timeout_seconds 从首次外部执行调用发出前持久化 started_at / deadline_at 开始计时，覆盖执行、同次修复、检查和只读 Post-Assess；排队、准备、Gate 等待和档案发布不计入。Runtime 重启不重置 deadline。达到总时限为 execution_timeout，取消正在进行的检查并保存实际结果，Attempt failed 后转错误 Gate；单个检查自身先超时仍按 CheckReport 的 failed 处理。Post-Assess 的单次调用同时受该 runner.timeout_seconds 限制。AI Gate 评估与 Refinement 不属于 Attempt，采用各自调用的时限。
 
 ### 停止与恢复
 
@@ -310,6 +311,6 @@ Adapter 是外部程序协议适配层，不实现模型推理、工具循环或
 
 Adapter 先保存每次实际调用输入，再原样传入外部程序；初始执行输入使用 agent_input_ref，审核输入使用 GateReport.request_input_ref，后续反馈逐次独立引用。模型服务凭据由环境或连接层注入，不进入记录；不挂载宿主机原生配置或跨 Attempt 共享会话。
 
-执行输出为代码修改、简短结论、原生事件、退出状态和日志；检查与 Checkpoint 由 Runtime / Git Manager 完成。AI Gate 输出必须解析成 result 或 action、rationale、evidence_refs 及条件必填修复字段，程序原生成功退出不能代替有效结构化结论。Adapter 不发起第二模型调用补写缺失结果，不创建 Decision 或接受成果。
+execute / repair 调用的原生结构化输出由 Adapter 解析成 ExecutionResult；post_assess 调用解析成 Post-AssessReport 内容，均存于 result_ref。AI Gate 输出解析为 result 或 action、rationale、evidence_refs 及条件必填修复字段。结构化输出不完整、证据引用无效或仅有成功退出码时，调用不能视为成功；Adapter 不发起第二模型调用补写结果，不创建 Decision 或接受成果。
 
 FacetLoom 只承诺保存自己提供的输入和可观测事件；外部 Agent 的内部系统提示、隐藏推理、压缩过程及未暴露的模型/工具信息不在可追溯承诺内。任务执行、AI 评估、精炼使用各自隔离的原生会话。接入协议属于设计目标，不表示四种 Adapter 已全部实现。

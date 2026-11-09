@@ -122,7 +122,7 @@ execution:
 1. 人类审阅并在 main 发布 Requirement r1、current、Workflow、Facet、runner、原生配置和审核评估器定义，准备好固定 digest 的镜像与本地凭据。
 2. Runtime 固定 source_commit，生成 DAG，先本地持久化，再发布初始精简档案。代码仍未变。
 3. Runtime 先创建 preparing Attempt，再固定代码输入与 Context Snapshot 转 pending。Adapter 预检容器内外部 Agent，保存实际初始请求和 agent_input_ref，再启动原生调用；版本、argv 与 session_id 保存在 Invocation 中。准备失败直接保存 ErrorRecord，不伪造输入。
-4. 外部 Agent 完成任务后，Runtime 执行 Workflow 与 Node 累积的必要检查；失败时 Adapter 续接原生会话，同一 Worker 最多修复并全量重检 2 次；最终 Tree 对应的完整结论形成后生成 Checkpoint 与 Post-Assess；将最终检查与轮次保存为 CheckReport，验证初始请求、bundle 和执行证据持久可读，固定 review_input_digest，进入 waiting_gate 并发布 main。
+4. 外部 Agent 原生结构化输出经 Adapter 校验并留存 ExecutionResult。Runtime 执行 Workflow 与 Node 累积的必要检查；失败时 Adapter 续接原生会话，每次修复返回新结果，同一 Worker 最多修复并全量重检 2 次。固定最终 Tree 后生成 Checkpoint 和 CheckReport，再以新会话、只读容器运行 Post-Assess；保存 Post-AssessReport、初始请求、bundle 和证据，固定 review_input_digest，进入 waiting_gate 并发布 main。
 5. Runtime 并行调度各项 Gate，AI 项使用独立外部 Agent 会话，脚本项直接运行程序；调用前保存实际评估请求，报告通过 request_input_ref 引用。各项报告只作为审核输出发布，不改写执行证据；全部批准和关联状态发布成功后，后继才可执行。
 6. application 与 data 并行，presentation 按稳定顺序三方汇聚，Agent 解决范围内冲突。若成果 Gate 发现缺少锁定到期恢复行为而拒绝，Attempt rejected，节点转错误处置。人类在错误 Gate 选择 repair_upstream，目标为 domain；决定发布后 domain 及其后继 stale，再按依赖重新执行。
 7. 所有节点 satisfied，Run completed。summary 记录结果、返工原因和待改进问题；完成不等于已经交付。
@@ -132,6 +132,18 @@ execution:
 如果第 8 步发生的是正式代码或定义变化，交付要求新 Run；同步到 r2 时取消旧版未终态运行，旧成果不能交付。
 
 脚本成果 Gate 返回 Rejected 时停止原 Attempt 的其余评估，并交给错误 Gate；已批准项不在旧 Attempt 上重开审核。确认缺少必需测试材料时，Attempt failed，通过错误处置安排补测的新 Attempt，所有成果 Gate 重新审核。评估器单纯超时保留原材料，由人类接管或请求重评。
+
+```json
+{
+  "schema_version": 1,
+  "applicability": "applicable",
+  "summary": "实现失败计数与锁定剩余时间。",
+  "evidence_refs": [],
+  "conflict_resolutions": []
+}
+```
+
+Adapter 只接受各 Agent 已探测支持的原生结构化输出。Runtime 按实际 Git Tree 判断 changed/no_change/not_applicable；Post-Assess 使用独立只读调用。输出无效、Applicability 不确定或只读副本被修改均进入错误 Gate；`concerns` 报告交由成果 Gate 审核。
 
 ### 自动恢复示例
 
@@ -198,6 +210,9 @@ main
 | 镜像/Agent 缺失、参数不支持或认证失败 | 保存实际错误，执行转错误 Gate；审核为评估故障 |
 | 关闭原生审批及内部沙箱 | 容器隔离、Scope、Runtime 检查与 Gate 继续生效 |
 | 检查修复与原生续接不支持 | 前者串行记录每次输入；后者进入错误 Gate，不自建 Agent 循环 |
+| 执行结果无效、Applicability 不确定或与实际 Tree 不符 | 保存 Invocation 和错误证据，进入错误 Gate；不猜测 outcome |
+| Post-Assess 发现问题 / 返回 concerns | 保留报告供成果 Gate 审核，不直接拒绝或接受 |
+| Post-Assess 只读调用改动成果、超时或输出无效 | Attempt 失败并进入错误 Gate；原 CheckReport 和 Checkpoint 保持不变 |
 | 原生成功退出但审核结果无效 | 评估故障，不能当作批准或拒绝 |
 | 总时限耗尽、Runtime 重启 | 原 deadline 不重置，停止执行并保存 execution_timeout |
 | PID 复用、容器状态查询失败或停止超时 | 按容器与进程启动身份对账；unknown 不当作退出，不重复启动 |

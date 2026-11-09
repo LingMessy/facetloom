@@ -17,14 +17,16 @@ sequenceDiagram
     RT->>RT: 保存 Adapter 组装的初始请求与 agent_input_ref
     RT->>W: 启动独立 detached Worktree 和容器，提交已保存请求
     RT->>RT: 持久化 Attempt=running
-    W->>W: 外部 Agent Pre-Assess 与执行
-    W-->>RT: 待检查候选
+    W->>W: 外部 Agent 执行与结构化结论
+    W-->>RT: 候选 Tree 与 ExecutionResult
     RT->>RT: 独立必要检查；失败经 Adapter 续接修复并重检
-    RT->>GM: 请求 Checkpoint
+    RT->>GM: 校验范围并请求 Checkpoint
     GM-->>RT: 本地输出 Commit
-    W->>RT: Post-Assess、结果与证据
+    RT->>W: 创建只读成果副本与检查报告
+    W->>RT: 独立 Post-Assess 结构化报告
     RT->>GM: 完成证据与初始请求的持久化、引用校验
-    RT->>RT: 固定审核输入与 review_input_digest，持久化 waiting_gate
+    RT->>RT: 固定执行结果、检查和 Post-Assess 证据，计算 review_input_digest
+    RT->>RT: 持久化 waiting_gate
     RT->>GM: 发布精简档案到 main
     GM-->>RT: waiting_gate 材料发布成功
     RT->>G: 并行评估固定上下文、代码与证据
@@ -169,12 +171,38 @@ independent_heads: []         # 实际参与计算的有序 Commit
 engine: <run.yaml.merge_engine 的完整有效配置>
 steps: []                     # M、H、最佳共同祖先、候选 Tree、中间 Commit、冲突
 input_commit: <commit-oid>
-conflicts: []                 # 各步冲突并集，不自动标记已解决
+conflicts: []                 # 各步冲突并集；每项含确定性 conflict_id，不自动标记已解决
 ~~~
 
-清单作为不可变 Artifact，通过 Context Snapshot.input_merge_ref 引用。Agent 必须逐项给出解决结果与证据，Runtime 校验路径范围、Git 对象完整性以及无未合并 index 项；不能只用搜索文本标记判断二进制冲突是否解决。冲突未解决不能进入成果 Gate，但可以携带实际材料进入错误 Gate。
+清单作为不可变 Artifact，通过 Context Snapshot.input_merge_ref 引用。每个冲突项的 conflict_id 为 `sha256:` 加该项按 RFC 8785 规范化 JSON 的摘要，摘要输入为 step、排序后的路径及各路径冲突类型。Agent 必须逐项给出解决结果与证据，Runtime 校验 conflict_id 集合完整且不重复、路径范围、Git 对象完整性以及无未合并 index 项；不能只用搜索文本标记判断二进制冲突是否解决。任一冲突 unresolved 时不进入成果 Gate，保留实际材料进入错误 Gate。
 
 汇聚 Agent 负责正常的代码集成冲突。冲突路径超出有效写入范围时在准备阶段报 permission_denied，不启动有越界权限的 Worker。Agent 判断问题来自前驱已批准行为与需求不对齐时，报 upstream_misaligned，引用具体前驱和证据，由错误 Gate 决定是否修复上游；不得静默更改上游责任。
+
+## 外部执行结果
+
+每次执行或修复调用都要求 Adapter 从 Agent 原生结构化输出解析 `ExecutionResult`。运行时要求的结构化输出能力由 Adapter `probe` 确认；缺失、格式错误、字段越界或证据引用无效均为执行故障，进入错误 Gate，不从自然语言猜测结论。
+
+~~~json
+{
+  "schema_version": 1,
+  "applicability": "applicable",
+  "summary": "实现锁定期限校验与剩余时间返回。",
+  "evidence_refs": [],
+  "conflict_resolutions": []
+}
+~~~
+
+| 字段 | 规则 |
+| --- | --- |
+| schema_version | 必须为 1 |
+| applicability | `applicable` 或 `not_applicable`；缺失、无法判断或其它值为无效结果并进入错误 Gate |
+| summary | 非空简述；not_applicable 时说明原因 |
+| evidence_refs | 可核对的类型化证据引用；not_applicable 至少一项 |
+| conflict_resolutions | 无输入冲突时为空；有冲突时必须逐项覆盖输入清单中的每个 conflict_id，记录 `resolved` 和 evidence_refs；resolved=false 时转错误 Gate |
+
+`ExecutionResult` 不声明是否有代码变化。Runtime 比较输出与 input_commit 的 Git Tree，结合 applicability、Scope 和冲突清单决定 outcome：改动存在且验证通过为 `changed`；无改动且 applicable 为 `no_change`；无改动且 not_applicable 为 `not_applicable`。not_applicable 有任何代码改动、证据缺失或理由为空时为执行错误。执行 Agent 的后续修复调用必须返回完整新 `ExecutionResult`；Runtime 仅采用最终候选对应的结果，旧结果保留为 Invocation 历史。
+
+Pre-Assess 是执行调用中的判断，不另起服务或 Gate。Agent 判断不适用时仍须按配置完成必要检查、Post-Assess 和成果 Gate；明确无法判断必须返回无效/升级结果并进入错误 Gate，不能把不确定映射成 not_applicable。
 
 ## 必要检查与同次修复
 
@@ -184,9 +212,9 @@ Runtime 从 Workflow 和选中 Node 累积必要检查，将限定 ID、argv、�
 Agent 执行 / 解决冲突
     ↓ 固定本轮候选 Tree
 全部必要检查
-    ├── 全部通过 → 最终 Checkpoint → 只读 Post-Assess → 冻结成果材料
+    ├── 全部通过 → 最终 Checkpoint → 独立只读 Post-Assess → 冻结成果材料
     ├── 检查失败且还有额度 → 同一 Worker 修复 → 全量重检
-    ├── 额度耗尽且证据完整 → 最终 Checkpoint → 只读 Post-Assess → 成果 Gate
+    ├── 额度耗尽且证据完整 → 最终 Checkpoint → 独立只读 Post-Assess → 成果 Gate
     └── 无法执行或材料缺失 → ErrorRecord → 错误 Gate
 ```
 
@@ -194,10 +222,49 @@ Agent 执行 / 解决冲突
 - 每轮按有效列表顺序执行全部检查，不因测试失败跳过其余项；命令无法启动等执行错误可中止该轮，其余项记 not_run。每项记录 check_id、round（从 1 开始）、evaluated_tree、passed / failed、退出码或 timeout、证据引用及使用环境。
 - 检查在该候选 Tree 的隔离副本运行，可写临时产物；不能把测试生成或修改的受跟踪文件带回成果。任何 Agent 代码修改都会使已有检查结果对新 Tree 失效，需要全量重检。
 - 已启动命令的非零退出或超时属于 failed 证据。命令无法启动、环境不可用或结果证据丢失属于执行错误，不用虚假 failed 结果补齐列表。
-- 检查失败通过 Adapter 续接原生会话反馈，外部 Agent 自行修复；无法安全续接则报错转错误 Gate，不在 Runtime 内实现模型/工具循环。修复轮次用尽后只允许对最终已检查 Tree 生成正式 Checkpoint；代码再变化必须新 Attempt。零项检查记录空清单，不能虚称有测试通过。
+- 检查失败通过 Adapter 续接原生会话反馈，外部 Agent 自行修复；每次续接先返回新的 ExecutionResult。无法安全续接则报错转错误 Gate，不在 Runtime 内实现模型/工具循环。修复轮次用尽后只允许对最终已检查 Tree 生成正式 Checkpoint；代码再变化必须新 Attempt。零项检查记录空清单，不能虚称有测试通过。
 - 每轮日志保存在 Artifact；精简档案保留最终 Tree、有效检查结论、修复次数及各轮证据引用。最终 Checkpoint Tree 必须等于最后一轮 evaluated_tree。
 
 检查修复预算只约束当前 Worker；错误 Gate 创建新 Attempt 或安排上游修复使用独立的 Run 级自动恢复额度。最终 integration.checks 仍须全部通过才可交付。
+
+### Post-Assess
+
+Post-Assess 由 Adapter 使用同一固定 runner 发起独立调用和新原生会话。输入是最终 Checkpoint、对应 CheckReport、ExecutionResult 与只读审核任务；容器将成果和报告只读挂载，另提供隔离的可写临时目录，不挂载 Git 写入凭据、Git 元数据或 Podman Socket。Runtime 核验候选 Tree 未变化；尝试写入只读成果、退出失败、超时或返回无效结构均为错误 Gate。容器和 Invocation 与执行阶段分别记录，但计入同一 Worker 的 deadline；不创建第二个 Worker。
+
+~~~json
+{
+  "schema_version": 1,
+  "status": "complete",
+  "summary": "代码变更满足任务范围，检查报告覆盖最终 Tree。",
+  "findings": [],
+  "evidence_refs": []
+}
+~~~
+
+`status` 为 `complete` 或 `concerns`。`concerns` 必须带非空 findings；两种状态都须有非空 summary。报告按 Attempt 的 output_refs 固定为执行证据。`concerns` 不自动判失败，由成果 Gate 审核；只读调用试图改成果、退出失败、超时或返回无效结构均使 Post-Assess 失败，形成 ErrorRecord 并进入错误 Gate。不得重新运行自检来覆盖此前报告。
+
+Post-AssessReport 保存在 `.facetloom/runs/<run-id>/reports/<report-id>.yaml`，`report_type: post_assess`，内容不可变。必需字段为 schema_version、report_id、run_id、combination_id、attempt_id、evaluated_tree、check_report_ref、execution_result_ref、invocation_ref、status、summary、findings、evidence_refs、created_at。发布前校验报告 Tree 等于最终 Checkpoint Tree、输入引用均可读取且匹配摘要；报告自身作为 role=evidence 的 run_record 加入 Attempt.output_refs。
+
+```yaml
+schema_version: 1
+report_type: post_assess
+report_id: <uuid>
+run_id: <run-id>
+combination_id: <combination-id>
+attempt_id: <attempt-id>
+evaluated_tree: <full-tree-oid>
+check_report_ref: reports/<check-report-id>.yaml
+execution_result_ref:
+  type: artifact
+  uri: artifacts://results/<immutable-key>
+  digest: sha256:<digest>
+invocation_ref: <invocation-id>
+status: complete
+summary: 检查报告覆盖最终 Tree，变更符合任务范围。
+findings: []
+evidence_refs: []
+created_at: "2026-11-09T12:00:00Z"
+```
 
 ### CheckReport
 
@@ -387,9 +454,9 @@ run_record 的路径相对对应运行目录，不得越出目录。Context Snap
 | --- | --- | --- |
 | changed | 输出 Tree 不同于 input_commit 的 Tree | 全部变更满足有效写入范围，冲突已逐项解决 |
 | no_change | 输出 Commit 直接复用 input_commit | 任务适用，已有输入满足目标，无需修改 |
-| not_applicable | 输出 Commit 直接复用 input_commit | 说明当前 Combination 为何不适用并引用实际证据 |
+| not_applicable | 输出 Commit 直接复用 input_commit | ExecutionResult 声明不适用，附原因和证据 |
 
-比较包含路径、内容和 Git 文件模式，不能仅比较文件列表。输入仍有未解决冲突时不得以 no_change / not_applicable 绕过解决义务。三种结论都需要最终 CheckReport、只读 Post-Assess 和全部成果 Gate；not_applicable 不删除 DAG 节点或跳过必要检查。
+比较包含路径、内容和 Git 文件模式，不能仅比较文件列表。输入仍有未解决冲突时不得以 no_change / not_applicable 绕过解决义务。changed 和 no_change 要求 applicability=applicable；not_applicable 要求零变更及有效理由、证据。三种结论都需要最终 CheckReport、只读 Post-Assess 和全部成果 Gate；not_applicable 不删除 DAG 节点或跳过必要检查。
 
 output_refs 在成果 waiting_gate 前可为空；Attempt 处于 waiting_gate 时必须有且仅有一个 role: code 引用。错误 Gate 不要求代码输出，使用独立 ErrorRecord。outcome 为 changed、no_change 或 not_applicable；不适用结论须有可核对的理由，且经过该 Attempt 的全部 Gate。拒绝、失败或取消的输出不能满足后继。
 
