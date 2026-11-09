@@ -108,12 +108,12 @@ execution:
 1. 人类审阅并在 main 发布 Requirement r1、current、Workflow、Facet 和审核评估器定义。
 2. Runtime 固定 source_commit，生成 DAG，先本地持久化，再发布初始精简档案。代码仍未变。
 3. Runtime 先创建 preparing Attempt，再固定代码输入与 Context Snapshot 转 pending。Adapter 保存实际初始请求和 agent_input_ref，再启动 Worker 并发送原请求。准备失败直接保存 ErrorRecord，不伪造输入。
-4. 执行 Workflow 与 Node 累积的必要检查，失败时同一 Worker 最多修复并全量重检 2 次；最终 Tree 对应的完整结论形成后生成 Checkpoint 与 Post-Assess；验证初始请求、bundle 和执行证据持久可读，固定 review_input_digest，进入 waiting_gate 并发布 main。
+4. 执行 Workflow 与 Node 累积的必要检查，失败时同一 Worker 最多修复并全量重检 2 次；最终 Tree 对应的完整结论形成后生成 Checkpoint 与 Post-Assess；将最终检查与轮次保存为 CheckReport，验证初始请求、bundle 和执行证据持久可读，固定 review_input_digest，进入 waiting_gate 并发布 main。
 5. Runtime 并行调度各项 Gate，调用前保存实际评估请求，报告通过 request_input_ref 引用。各项报告只作为审核输出发布，不改写执行证据；全部批准和关联状态发布成功后，后继才可执行。
 6. application 与 data 并行，presentation 按稳定顺序三方汇聚，Agent 解决范围内冲突。若成果 Gate 发现缺少锁定到期恢复行为而拒绝，Attempt rejected，节点转错误处置。人类在错误 Gate 选择 repair_upstream，目标为 domain；决定发布后 domain 及其后继 stale，再按依赖重新执行。
 7. 所有节点 satisfied，Run completed。summary 记录结果、返工原因和待改进问题；完成不等于已经交付。
 8. 另一个 clone 此时发布自己的 Run 档案。main 头变化，但 project_tree 不变，当前运行仍可交付。
-9. Git Manager 在最新 main 上构造代码候选，保留全部最新档案，运行最终检查；人类确认后提交代码，并追加 DeliveryRecord。
+9. Git Manager 在最新 main 上构造可恢复候选，保留全部最新档案，运行最终检查并保存 IntegrationReport；人类确认绑定报告与 candidate_tree 后提交代码，再追加 DeliveryRecord。重复请求返回原交付意图；无代码变化则直接提交 no_change 回执。
 
 如果第 8 步发生的是正式代码或定义变化，交付要求新 Run；同步到 r2 时取消旧版未终态运行，旧成果不能交付。
 
@@ -158,7 +158,7 @@ main
 └── refinements/<id>/
 
 持久 Artifact
-└── 执行/评估初始请求、可恢复代码的 bundle、测试报告与大型证据
+└── 执行/评估初始请求、可恢复代码的 bundle、检查日志、可恢复候选与大型证据
 ```
 
 ## 验收场景
@@ -217,3 +217,16 @@ main
 | 已提交事务重复恢复 | 状态、恢复额度和动作 ID 只应用一次 |
 | Worker 启动或评估请求发送结果未知 | 按稳定 ID 对账，无法确认则人工处理，不自动重发 |
 | 推送成功但本地未确认、档案后来被精炼删除 | 通过操作 Trailer 对账历史，不重复恢复或复活档案 |
+| Node 的 Scope 为 src/auth/**，另一组为 src/** | all_of 保留交集，只允许 src/auth/**，不扩大到 src/** |
+| 空写入组或只读 Scope，未来新增路径 | 空组拒绝全部写入；新路径按原分组规则实时判断 |
+| Worker 自报通过但没有 CheckReport | 不能进入成果审核；必须有 Runtime 的真实检查记录 |
+| 最终 CheckReport 对应旧 Tree 或缺项 | 拒绝成果材料冻结；旧通过不能证明新代码 |
+| no_change / not_applicable 仍修改代码或留下冲突 | 与代码条件不符，不能接受成果 |
+| 最终汇聚失败尚无完整候选 | IntegrationReport blocked，candidate_ref / candidate_tree 为 null，保留冲突证据 |
+| 最终检查未启动 / 测试执行失败 | 分别为 blocked / failed；未运行项不能当作通过 |
+| 检查后候选或所选报告变化 | 旧确认失效；对新报告与候选重新确认 |
+| 确认后只有其他 Run 档案提交 | 保留最新档案，允许复用原确认；源码变化则要求新 Run |
+| 连续点击交付、不同 operation_id、推送确认丢失 | 同一 Run 复用交付意图与 delivery_id，对账后返回一次成功结果 |
+| 最终候选与正式输入相同 | 仍须通过最终检查与人类确认，只发布 no_change 回执 |
+| 已交付后的代码又被修改，或回执当前文件被清理 | 从历史查到已成功交付，不能用原 Run 重复应用成果 |
+| 准备放弃运行但交付结果仍未知 | 先对账，确认未交付后才允许放弃或清理 |

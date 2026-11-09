@@ -119,7 +119,7 @@ execution:
       timeout_seconds: 120
 ~~~
 
-有效检查按 Workflow → facets 声明顺序 → 各列表顺序累积，不能覆盖或移除。限定 ID 为 `workflow/<id>` 或 `<facet>/<node>/<id>`，同一声明者内部不能重复。`execution.max_check_retries` 仅在 Workflow 配置。修复、全量重检和证据规则见 [Execution](04-execution.md)。`integration.checks` 独立用于交付，不替代节点检查。
+有效检查按 Workflow → facets 声明顺序 → 各列表顺序累积，不能覆盖或移除。限定 ID 为 `workflow/<id>` 或 `<facet>/<node>/<id>`，同一声明者内部不能重复。`execution.max_check_retries` 仅在 Workflow 配置。修复、全量重检和 CheckReport 对象见 [Execution](04-execution.md)。`integration.checks` 独立用于交付，不替代节点检查。
 
 ### 错误 Gate
 
@@ -240,7 +240,7 @@ mappings:
     paths: [src/shared/**]
 ~~~
 
-scope.mapping 是相对 Facet 文件解析的路径。每个 scope_id 在该文件中唯一，Node 的 scope 必须能解析到一个 mapping。paths 是仓库相对 POSIX glob：`*` 和 `?` 不跨 `/`，`**` 可跨目录，支持字符集合，不支持否定规则；禁止绝对路径、空路径和包含 .. 的路径。范围交集按每个实际路径同时满足各组匹配条件判断，不对 glob 字符串求交集。未声明 Scope 的 Node 没有额外路径范围。
+scope.mapping 是相对 Facet 文件解析的路径。每个 scope_id 在该文件中唯一，Node 的 scope 必须能解析到一个 mapping。paths 是仓库相对 POSIX glob：`*` 和 `?` 不跨 `/`，`**` 可跨目录，支持字符集合，不支持否定规则；禁止绝对路径、空路径和包含 .. 的路径。范围交集按每个实际路径同时满足各组匹配条件判断，不对 glob 字符串求交集；Snapshot 使用 execution.write_scope.all_of 保留原始分组和来源，格式见 Execution。未声明 Scope 的 Node 没有额外路径范围。
 
 Node 列表顺序只用于稳定表示，不是依赖。每张 Facet DAG 必须满足：
 

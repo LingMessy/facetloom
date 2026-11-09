@@ -135,14 +135,15 @@ Git Manager 是唯一执行受信 Git 写入的组件；管理 main、隔离 Wor
 | 操作 | 校验 |
 | --- | --- |
 | 创建运行 | source_commit、当前需求、定义、DAG 与 Run ID 唯一性 |
-| 保存 Checkpoint | Attempt、输入、修改范围、取消或失效状态 |
+| 保存 Checkpoint | Attempt、输入、分组写入 Scope、outcome 与 Tree 一致性、取消或失效状态 |
+| 保存 CheckReport | Snapshot 检查清单、真实执行记录、修复次数与最终 Tree，禁止 Worker 自报通过替代结果 |
 | 发布档案 | owner_runtime_id、预期记录摘要、ID、引用和持久证据 |
 | 发布成果 waiting_gate | 最终 Tree 的全部检查有结果、agent_input_ref 与执行证据持久可读、固定字段与 review_input_digest 一致 |
 | 发布错误 waiting_gate | failed / rejected Attempt、ErrorRecord 与可用证据已保存，错误策略有效；不要求成果字段 |
 | 保存成果 Gate | review_kind=result、固定材料摘要、策略、主体、报告/接管依据、Attempt 摘要、前一决策和 evaluated_tree |
 | 保存错误 Gate | review_kind=error、active_error_ref、错误策略及摘要、CombinationRun 摘要、前一决定、Run 计数、修复范围与动作 ID |
 | 发布定义 | 人类审阅、Requirement 新版规则、定义和 DAG 校验 |
-| 集成交付 | current、project_tree、有效输出、Report、人类确认 |
+| 集成交付 | current、project_tree、有效终端输出、可恢复候选、通过的 Report、绑定确认、已有交付与活动 delivery_id |
 | Refinement 提交 | 来源与目标摘要、确认 Diff、验证结果、清理引用完整性 |
 
 发布档案使用独立的 main 发布 Worktree，不切换用户工作目录，不混入其它未提交修改。先读取远端头，在其上应用仅限本次操作的路径补丁，再正常 Commit 与 fast-forward Push。每个提交包含 `FacetLoom-Operation: <operation-id>` Trailer；成功后记录已发布头与操作 ID。一次操作重构提交时保留同一 ID。
@@ -161,7 +162,7 @@ B 获取最新头，检查自己的预期输入
 ```
 
 - 不同 Run 的目录可以自动重新追加；不得用整个旧 Tree 覆盖 main。
-- 同一 Run 先串行化本地写入，远端以预期文件摘要和操作 ID 去重。Gate 按 gate_id 校验前一决策；其他 Gate 的更新可在复核固定材料后合并，冲突不采用最后写入者覆盖。
+- 同一 Run 先串行化本地写入，远端以预期文件摘要和操作 ID 去重。交付还按 run_id 去重，不同操作 ID 也不能重复交付同一运行。Gate 按 gate_id 校验前一决策；其他 Gate 的更新可在复核固定材料后合并，冲突不采用最后写入者覆盖。
 - 已发布后重试先核对操作是否存在，避免重复决策、交付或复活已清理档案。
 - main 新增或清理 `.facetloom/runs/` 不改变正式输入；其余路径变化按 Execution 的基线规则处理。
 - 同步不可用时保存本地待发布操作，需在线确认的 Gate 与交付等待；不强推，不自动改写历史。
@@ -170,7 +171,9 @@ B 获取最新头，检查自己的预期输入
 
 根输入来自 source_commit，汇聚输入来自最终约简 DAG 快照的直接前驱当前有效输出，按 Execution 的稳定逐步三方合并协议构造。活动 Worktree 锚定需要的本地 Commit；关闭前保证有后继 Worktree 或已验证的持久 bundle。记录发布前上传所需 Artifact，验证 bundle 在空仓库中可恢复输入与输出。不用额外命名分支维持快照。
 
-正式成果交付时，保留最新 main 档案，在其上应用已接受代码变更并校验 project_tree。运行完成和交付分别记录；交付回执写入后续 Commit。
+正式成果交付时，保留最新 main 档案，在其上应用已接受代码变更并校验 project_tree；候选及最终检查报告先持久化，再获取绑定候选的人类确认。运行完成和交付分别记录：applied 在集成后追加回执；no_change 不创建空代码 Commit，直接发布回执。
+
+本地 `.runtime/runs/<run-id>/delivery.yaml` 保存活动交付意图和确认。调度、取消及交付共用 Run 锁；准备 main 提交时再获取仓库发布锁。远端推送仍依赖 fast-forward 校验，推送失败必须刷新并重验。publishing 结果未知时先查 Trailer，不创建第二个 delivery_id。协议与字段见 Execution。
 
 ## Refinement 协调
 

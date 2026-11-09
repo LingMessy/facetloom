@@ -33,11 +33,11 @@ CLI 随各阶段提供可操作的验证入口。每阶段完成验收后进入�
 
 **依赖：** 阶段 1 的有效定义与 DAG。
 
-**交付物：** WorkflowRun、CombinationRun、Attempt 的文件事务及崩溃重放；preparing 阶段与 ErrorRecord；单 Worker 的 detached Worktree、容器隔离与 Agent Adapter；Context Snapshot、实际初始请求留存、Checkpoint 和持久 Artifact；单写入者的基础档案发布；CLI 启动和查看。
+**交付物：** WorkflowRun、CombinationRun、Attempt 的文件事务及崩溃重放；preparing 阶段与 ErrorRecord；单 Worker 的 detached Worktree、容器隔离与 Agent Adapter；保留 Scope 分组的 Context Snapshot、实际初始请求留存、CheckReport、Checkpoint 和持久 Artifact；单写入者的基础档案发布；CLI 启动和查看。
 
 **验收条件：**
 
-- 根节点从 preparing 执行到成果 waiting_gate；Workflow 与 Node 检查累积，同次最多修复并重检 2 次，代码变化后全量重检；完整材料才冻结并发布。
+- 根节点从 preparing 执行到成果 waiting_gate；Workflow 与 Node 检查累积，同次最多修复并重检 2 次，代码变化后全量重检；完整材料才冻结并发布，CheckReport 最终 Tree 必须等于成果 Tree，三种 outcome 与代码条件一致。
 - 固定代码和证据可恢复、摘要可校验；执行失败、取消和材料发布失败可查询，不丢失待发布记录。
 - Worker 遵守路径、工具和凭据边界，无法直接写 main 或人类决策。
 
@@ -58,14 +58,14 @@ CLI 随各阶段提供可操作的验证入口。每阶段完成验收后进入�
 
 **依赖：** 阶段 3 的分项决策与成果接受机制。
 
-**交付物：** DAG 并行调度、稳定排序、逐步基于真实共同祖先的多前驱汇聚、冲突清单、Scope 校验、受控重试与后继失效传播；Runtime 重启恢复；main 档案并发发布和 clone 协作；最终集成检查与交付回执；CLI 取消、重试、恢复和交付。
+**交付物：** DAG 并行调度、稳定排序、逐步基于真实共同祖先的多前驱汇聚、冲突清单、Scope 校验、受控重试与后继失效传播；Runtime 重启恢复；main 档案并发发布和 clone 协作；可恢复的最终候选、IntegrationReport、绑定候选的交付确认与回执；CLI 取消、重试、恢复和交付。
 
 **验收条件：**
 
 - 通过 CLI 跑通登录限制 Demo：分支并行、汇聚等待全部前驱、冲突处理、审核和最终交付。
 - 事务提交前后崩溃、外部调用未知、推送失败和重复操作不丢记录、不重复扣减恢复额度、不重复接受或交付；不同 clone 的档案互不覆盖，bundle 可在另一 clone 恢复代码。
 - 需求取代与上游修复正确停止或失效相关执行；过期成果不能交付，仅档案变化不使运行输入失效。
-- 最终检查完成并经人类确认后交付 main，保留最新档案，能够从交付回执追溯需求、成果和验证。
+- 最终检查通过并经绑定候选的人类确认后交付 main，保留最新档案；同一 Run 最多一次成功交付，无代码变化只提交回执，未形成候选不能伪造报告字段。
 
 ## 5. WebUI 与 Refinement
 

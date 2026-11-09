@@ -48,7 +48,8 @@ Workflow 按 Facet 声明顺序从外到内应用 DAG 节点替换积，例如 `
 | Context Snapshot / Checkpoint | 固定一次尝试的输入与代码结果 | 本地；发布证据时附持久引用 |
 | ErrorRecord | 准备、执行或成果拒绝的不可变错误材料 | main 的运行档案 errors/ |
 | GateReport / GateDecision | 成果审核或错误处置的证据与决策 | main 的运行档案 |
-| IntegrationReport / DeliveryRecord | 最终检查与成功交付回执 | main 的运行档案 |
+| CheckReport | 一个 Attempt 的检查轮次、候选 Tree 与执行结果 | main 的运行档案 reports/ |
+| IntegrationReport / DeliveryRecord | 最终候选、检查与一次成功交付回执 | main 的运行档案 |
 | Refinement | 筛选记录、提出并落实改进的交互过程 | 本地会话；结果体现在 main 的修改与 Commit 描述 |
 | Runtime State | 队列、Worker、容器和未发布操作 | clone-local；SQLite 可选 |
 
@@ -96,10 +97,10 @@ Git 分支只有 `main`。DAG 分支由独立 Worktree 执行；输入与 Checkp
 │   ├── errors/<error-id>.yaml
 │   ├── checkpoints/<checkpoint-id>.yaml
 │   ├── decisions/<decision-id>.yaml
-│   ├── reports/<report-id>.yaml           # GateReport / IntegrationReport
+│   ├── reports/<report-id>.yaml           # CheckReport / GateReport / IntegrationReport
 │   └── deliveries/<delivery-id>.yaml
 └── .runtime/                             # 加入 gitignore
-    ├── runs/<run-id>/                    # 完整状态、待发布记录
+    ├── runs/<run-id>/                    # 完整状态、待发布记录、delivery.yaml 交付意图
     ├── transactions/<operation-id>/       # 事务清单、载荷与提交标记
     ├── locks/
     ├── worktrees/<attempt-id>/
@@ -118,6 +119,8 @@ Git 分支只有 `main`。DAG 分支由独立 Worktree 执行；输入与 Checkp
 3. **成果隔离**：Worker 修改发生在独立 Worktree；main 代码更新经过人类确认和最终检查。
 4. **恢复有边界**：Git 恢复已发布证据，本地持久状态恢复活动运行；未发布状态不能仅靠 Git 重建。
 5. **精炼可追溯**：已处理档案可从当前目录删除；改进 Commit 引用删除前的证据，Git 历史不改写。
+
+每个 Run 最多一次成功交付，重复请求返回已有结果。最终候选未改变代码时只提交经检查和人类确认的 no_change 回执，不创建空代码 Commit。
 
 只增删运行档案不会使执行输入失效。交付前比较 main 与 `source_commit`，排除 `.facetloom/runs/` 后有任何变化都需要新 Run。具体并发和交付规则见 [Execution](04-execution.md)。
 

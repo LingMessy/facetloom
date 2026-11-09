@@ -152,7 +152,7 @@ stateDiagram-v2
 ├── errors/<error-id>.yaml
 ├── checkpoints/<checkpoint-id>.yaml
 ├── decisions/<decision-id>.yaml
-├── reports/<report-id>.yaml              # GateReport / IntegrationReport
+├── reports/<report-id>.yaml              # CheckReport / GateReport / IntegrationReport
 └── deliveries/<delivery-id>.yaml
 ```
 
@@ -162,7 +162,7 @@ Context Snapshot 按文件字节 SHA-256 命名且不可原地修改。Combinati
 
 **Attempt 必须先在本地原子持久化，再启动 Worker。** 发布节点将关联状态与证据作为一个 main Commit 写入，Git 保留此前已发布状态；不要求每次内部状态变化都提交。其它 clone 同步后看到的是档案，不是活动 Worker 的恢复状态。
 
-WorkflowRun completed 与交付分开；IntegrationReport 和 DeliveryRecord 见 Execution。待交付运行保留所需记录。人类可明确放弃 completed 且未交付运行，在 run.yaml 保存 delivery_abandonment，不改变 Run 终态；此后需新 Run 才能交付。已结束且不再服务恢复、审核或交付的记录可进入 Refinement；按项清理并保留未解决问题，不能删除有效引用的目标而不更新引用。
+WorkflowRun completed 与交付分开；一个 Run 最多一次成功交付，重复请求返回已交付结果。CheckReport、IntegrationReport、交付意图及 DeliveryRecord 见 Execution。待交付运行保留所需记录。人类可明确放弃 completed 且未交付运行；publishing 结果未知时先对账，不能先放弃或清理。在 run.yaml 保存 delivery_abandonment，不改变 Run 终态；此后需新 Run 才能交付。已结束且不再服务恢复、审核或交付的记录可进入 Refinement；按项清理并保留未解决问题，不能删除有效引用的目标而不更新引用。
 
 WorkflowRun 清单 `run.yaml` 示例：
 
@@ -256,7 +256,7 @@ updated_at: "2026-11-09T12:00:00Z"
 | stale | 因自身或祖先修复失效，不可作为后继输入 |
 | cancelled | Run 已取消，不再调度 |
 
-同一 CombinationRun 最多一个活动 Attempt；错误处置期间旧 Attempt 可以已经终态。新 Attempt 不能继承旧批准。no_change 和 not_applicable 也须完成必要检查与全部成果 Gate。
+同一 CombinationRun 最多一个活动 Attempt；错误处置期间旧 Attempt 可以已经终态。新 Attempt 不能继承旧批准。no_change 和 not_applicable 必须复用 input_commit，且无未解决冲突；三种 outcome 的代码条件见 Execution，均须完成必要检查与全部成果 Gate。
 
 ### 状态如何推进
 
@@ -350,7 +350,7 @@ accepted、rejected、failed、cancelled 为终态，不因错误处置重新打
 | status | 是 | 当前 Attempt 状态 |
 | outcome | 条件 | 成果审核时为 changed / no_change / not_applicable；执行失败可空 |
 | summary | 条件 | waiting_gate 或终态必填；not_applicable 说明理由 |
-| output_refs | 是 | 初始为空；成果 waiting_gate 时恰有一个 role: code 引用及全部必要证据 |
+| output_refs | 是 | 初始为空；成果 waiting_gate 时恰有一个 role: code 引用，并引用最终 CheckReport 及其他必要证据 |
 | review_input_digest | 条件 | 成果 waiting_gate 前固定，算法见 Execution；准备失败可空 |
 | gate_report_refs、gate_decision_refs | 是 | 成果 gate_id 到最新报告 / 决定引用的映射，初始空 |
 | status_reason | 条件 | failed / cancelled 必填 |

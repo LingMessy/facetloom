@@ -11,7 +11,7 @@
 ├── Runs
 │   ├── Summary / 未解决问题
 │   ├── DAG / CombinationRun / Attempt
-│   ├── Diff / Checkpoint / Evidence
+│   ├── Diff / Checkpoint / CheckReport / Evidence
 │   ├── 成果 Gates / GateReport / GateDecision
 │   ├── 错误 Gate / ErrorRecord / 恢复动作
 │   └── IntegrationReport / DeliveryRecord
@@ -29,7 +29,7 @@
 | Run | 本地状态与已发布状态、结果、问题和证据 | 取消、重试、请求交付或明确放弃未交付成果 |
 | 成果 Gate | 各 Node 的模式、审核要求、报告、主体与汇总状态 | 人工项决策、批量确认、异常接管或请求重评 |
 | 错误 Gate | 错误阶段、材料、处置报告、当前额度及失效范围 | 重试当前节点、修复祖先、等待或停止；异常接管 |
-| Delivery | 候选代码、最终报告、当前需求与基线检查 | 确认交付 |
+| Delivery | 固定候选、最终报告、绑定确认、交付意图与成功回执 | 确认交付、重跑最终检查、查看或恢复待对账操作 |
 | Refinement | 已结束运行、筛选项、建议、拟修改和删除内容 | 采纳、暂留、丢弃、确认提交 |
 | Local Runtime | Worker、容器、待发布操作、同步与恢复 | 停止 Worker、恢复本地运行 |
 
@@ -82,11 +82,24 @@ Workflow 错误 Gate：human / ai_assisted / ai / script
 
 错误页以 ErrorRecord 为审核对象；未形成的输入、Snapshot 和输出显示“尚未形成”，不显示虚假 Diff。明确展示“处置动作”，不使用“批准成果”按钮。查看旧 Attempt 时保留 failed / rejected，不把恢复获准显示成 accepted。
 
-同时展示 `检查修复：已用 / max_check_retries` 与 `自动恢复：auto_recoveries_used / max_auto_recoveries`，前者属于 Attempt，后者属于整个 Run。每轮检查显示 Tree、全部检查结果及证据；代码变化后旧通过结果标为历史，不能代表新 Tree。
+同时展示 `检查修复：已用 / max_check_retries` 与 `自动恢复：auto_recoveries_used / max_auto_recoveries`，前者属于 Attempt，后者属于整个 Run。每轮通过 CheckReport 显示 Tree、全部检查结果及证据；error / not_run 与 failed 分开显示，代码变化后旧通过结果标为历史，不能代表新 Tree。
 
 处置提交绑定 error_ref、错误策略与审核摘要、当前节点摘要、前一决定；服务再次校验额度、Run 和修复范围。自动额度耗尽或错误评估器故障时提供人工接管，禁止自动循环重评。wait 后可以引用原错误作出新决定；已安排恢复或已经失效的错误不能重复执行。
 
 所有审核与处置显示“本地待发布 / 已发布”，恢复动作在决定发布后才启动。Runtime 页面显示文件事务恢复、外部操作 unknown 和待对账原因，不把浏览器重试等同于创建新操作。
+
+## 交付交互
+
+~~~text
+运行完成 → 汇聚终端成果 → 固定候选与 IntegrationReport
+    ├── blocked：展示已形成材料，不显示虚假候选或通过
+    ├── failed：展示失败检查，可对原候选重新检查
+    └── passed：人类确认具体报告与候选 → 发布 → DeliveryRecord
+~~~
+
+确认页展示报告 ID、候选 Tree、代码 Diff、需求及基线；确认后更换报告或候选必须重新确认。仅档案变化可保留确认，源码或定义变化要求新 Run。publishing 显示“正在推送 / 结果待对账”，重复点击返回原交付意图。
+
+applied 显示集成 Commit，no_change 显示“检查通过，无代码需应用”及成功回执；两者都属于一次成功交付，不提供对同一 Run 再次交付的按钮。汇聚冲突时仅显示冲突证据，candidate_ref 尚未形成。
 
 ## Refinement 交互
 

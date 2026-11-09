@@ -45,6 +45,7 @@ Refinement → 人类筛选记录 → Agent 建议 → 采纳并验证
 | CombinationRun / Attempt | 一个节点的运行状态及一次执行、重试或评估 |
 | Worker | 承载 Attempt 的隔离进程或容器 |
 | ErrorRecord | 准备、执行失败或成果拒绝的不可变错误材料 |
+| CheckReport | Runtime 的必要检查轮次、被检查 Tree 与真实结果 |
 | GateReport / GateDecision | 成果审核及错误处置的报告与决定，均支持四种模式 |
 | Refinement | 人机筛选运行记录、落实改进并清理已处理记录的过程 |
 
@@ -61,7 +62,7 @@ Refinement → 人类筛选记录 → Agent 建议 → 采纳并验证
 
 审核定义统一进入 Git。Workflow 与 Node 的必要检查累积，同一 Attempt 默认最多修复并重检 2 次；完成后冻结成果输入。执行失败或成果拒绝交给独立错误 Gate，决定重试、修复上游、等待或停止；默认人工，每个 Run 最多自动恢复 3 次。恢复获准不代表成果被接受，补测或修改冻结成果需要新 Attempt。
 
-只改变运行档案不会使运行输入失效。交付前对比 source_commit 与最新 main，排除 `.facetloom/runs/` 后有代码或定义变化则创建新 Run；交付提交保留最新档案。
+只改变运行档案不会使运行输入失效。交付前对比 source_commit 与最新 main，排除 `.facetloom/runs/` 后有代码或定义变化则创建新 Run；交付提交保留最新档案。确认绑定具体候选与最终报告，同一 Run 最多一次成功交付；无代码变化也须检查和确认，通过回执记录结果。
 
 Refinement 的界面入口为「运行精炼」，CLI 为 `facetloom refine`。采纳项验证成功后才清理对应记录；暂留问题、活动运行、待 Gate 和待交付证据继续保留。原记录通过 Git 历史追溯，清理目标是当前目录与 Agent 上下文，不重写历史。
 
