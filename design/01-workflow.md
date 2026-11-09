@@ -305,9 +305,9 @@ flowchart LR
 
 空交集表示只读，允许有证据的 no_change 或 not_applicable；需要修改则报错，不自动扩权。Runtime 校验新增、删除、文件模式、重命名两端和符号链接目标，禁止通过路径或链接越界。自动汇聚已接受前驱的变更不受当前节点 Scope 重新裁剪；Agent 对汇聚输入的新增修改仍受约束。冲突路径必须全部在有效写入范围内，否则进入错误 Gate；逐项解决清单和确定性 conflict_id 见 [Execution](04-execution.md)。
 
-Snapshot 保存有效输入清单，Adapter 实际发送的初始上下文另通过 Attempt.agent_input_ref 留存，外部 Agent 原生结构化结果与只读 Post-Assess 按 [Execution](04-execution.md) 校验。执行、必要测试和 Post-Assess 完成后冻结审核输入，再启动各项 Gate。
+Snapshot 保存有效输入清单，Adapter 实际发送的预检上下文另通过 Attempt.agent_input_ref 留存。正式 Pre-Assess 使用独立只读调用；缺少输入进入错误 Gate，风险作为证据交给已配置的成果 Gate。适用性与后续执行结果按 [Execution](04-execution.md) 的结构化协议校验；必要测试和只读 Post-Assess 完成后冻结审核输入，再启动各项 Gate。
 
-动态 Applicability 和 Pre-Assess 在 Attempt 中执行，不改变组合 DAG。Applicability 明确为不适用时，Attempt 必须保存理由和证据；无法判断时进入错误 Gate，不能默认跳过 Workflow 要求的验证。
+动态 Applicability 和 Pre-Assess 在 Attempt 中执行，不改变组合 DAG。明确不适用时跳过代码执行但仍完成必要检查、Post-Assess 和所有成果 Gate；无法判断时进入错误 Gate，不能默认跳过 Workflow 要求的验证。
 
 ## 组合 DAG 的生成规则
 

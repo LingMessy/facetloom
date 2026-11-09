@@ -14,11 +14,20 @@ sequenceDiagram
     RT->>GM: 汇聚前驱输入，创建 Context Snapshot
     GM-->>RT: 输入和上下文就绪；失败则创建 ErrorRecord
     RT->>RT: 一次固定输入与 Snapshot，Attempt=pending
-    RT->>RT: 保存 Adapter 组装的初始请求与 agent_input_ref
-    RT->>W: 启动独立 detached Worktree 和容器，提交已保存请求
+    RT->>RT: 保存只读预检请求与输入引用
+    RT->>W: 启动只读 Pre-Assess 调用
     RT->>RT: 持久化 Attempt=running
-    W->>W: 外部 Agent 执行与结构化结论
-    W-->>RT: 候选 Tree 与 ExecutionResult
+    W-->>RT: PreAssessResult
+    alt ready + applicable
+        RT->>W: 启动执行容器与外部 Agent
+        W-->>RT: 候选 Tree 与 ExecutionResult
+    else ready + not_applicable
+        RT->>RT: 跳过代码执行并复用 input_commit
+    else blocked
+        break 预检阻塞或无效
+            RT->>RT: ErrorRecord → 错误 Gate
+        end
+    end
     RT->>RT: 独立必要检查；失败经 Adapter 续接修复并重检
     RT->>GM: 校验范围并请求 Checkpoint
     GM-->>RT: 本地输出 Commit
@@ -178,6 +187,55 @@ conflicts: []                 # 各步冲突并集；每项含确定性 conflict
 
 汇聚 Agent 负责正常的代码集成冲突。冲突路径超出有效写入范围时在准备阶段报 permission_denied，不启动有越界权限的 Worker。Agent 判断问题来自前驱已批准行为与需求不对齐时，报 upstream_misaligned，引用具体前驱和证据，由错误 Gate 决定是否修复上游；不得静默更改上游责任。
 
+## Pre-Assess
+
+每个 Attempt 先由 Adapter 使用固定 runner 发起独立只读调用与新原生会话。输入为 Context Snapshot、Requirement、选中 Node 上下文及已接受前驱证据；不挂载可写 Worktree、Git 凭据、Git 元数据或 Podman Socket。Adapter 必须在 `probe` 时确认原生结构化输出能力，不从自然语言推测字段。
+
+~~~json
+{
+  "schema_version": 1,
+  "readiness": "ready",
+  "applicability": "applicable",
+  "summary": "输入足以实现并验证锁定期限行为。",
+  "missing_inputs": [],
+  "risk_findings": [],
+  "evidence_refs": []
+}
+~~~
+
+| 字段 | 规则 |
+| --- | --- |
+| readiness | `ready` 或 `blocked` |
+| applicability | `ready` 时必填 `applicable` 或 `not_applicable`；`blocked` 时必须为 null |
+| summary | 非空说明 |
+| missing_inputs | `blocked` 时至少一项，`ready` 时为空；每项含说明和 evidence_refs |
+| risk_findings | 风险说明及 evidence_refs；只传入成果 Gate，不动态新增 Gate，不阻塞执行 |
+| evidence_refs | 支持结论的类型化证据引用；not_applicable 至少一项 |
+
+`ready + applicable` 才启动代码执行。`ready + not_applicable` 跳过代码执行并复用 input_commit，但仍执行必要检查、Post-Assess 和所有成果 Gate；若 input_merge 清单含未解决冲突，则不能据此跳过冲突处理，转错误 Gate。`blocked` 创建 ErrorRecord 并进入 Workflow 错误 Gate，不启动执行；Runtime 保留预检报告供恢复决策。结构无效、Applicability 不明确、矛盾字段或证据引用无效均作为预检故障进入错误 Gate。风险发现是固定成果审核输入的一部分，不临时扩充策略。
+
+PreAssessReport 保存在 `.facetloom/runs/<run-id>/reports/<report-id>.yaml`，`report_type: pre_assess`，内容不可变。报告包含 schema_version、report_id、run_id、combination_id、attempt_id、invocation_ref、readiness、applicability、summary、missing_inputs、risk_findings、evidence_refs、created_at。invocation_ref 是不含报告自身的不可变 Invocation 证据 Artifact。有效报告通过 Attempt.pre_assess_ref 引用；blocked 时 ErrorRecord.evidence_refs 引用报告。预检未形成有效报告时，ErrorRecord 引用可用的调用输入、原生输出与故障证据，不伪造报告。输入不足不伪造成 ExecutionResult 或 CheckReport。
+
+~~~yaml
+schema_version: 1
+report_type: pre_assess
+report_id: <uuid>
+run_id: <run-id>
+combination_id: <combination-id>
+attempt_id: <attempt-id>
+invocation_ref:
+  type: artifact
+  uri: artifacts://invocations/<immutable-key>
+  digest: sha256:<digest>
+readiness: ready
+applicability: applicable
+summary: 输入足以完成本节点任务。
+missing_inputs: []
+risk_findings: []
+evidence_refs: []
+created_at: "2026-11-09T12:00:00Z"
+~~~
+
 ## 外部执行结果
 
 每次执行或修复调用都要求 Adapter 从 Agent 原生结构化输出解析 `ExecutionResult`。运行时要求的结构化输出能力由 Adapter `probe` 确认；缺失、格式错误、字段越界或证据引用无效均为执行故障，进入错误 Gate，不从自然语言猜测结论。
@@ -185,7 +243,6 @@ conflicts: []                 # 各步冲突并集；每项含确定性 conflict
 ~~~json
 {
   "schema_version": 1,
-  "applicability": "applicable",
   "summary": "实现锁定期限校验与剩余时间返回。",
   "evidence_refs": [],
   "conflict_resolutions": []
@@ -195,14 +252,11 @@ conflicts: []                 # 各步冲突并集；每项含确定性 conflict
 | 字段 | 规则 |
 | --- | --- |
 | schema_version | 必须为 1 |
-| applicability | `applicable` 或 `not_applicable`；缺失、无法判断或其它值为无效结果并进入错误 Gate |
-| summary | 非空简述；not_applicable 时说明原因 |
-| evidence_refs | 可核对的类型化证据引用；not_applicable 至少一项 |
+| summary | 非空简述 |
+| evidence_refs | 可核对的类型化执行证据引用 |
 | conflict_resolutions | 无输入冲突时为空；有冲突时必须逐项覆盖输入清单中的每个 conflict_id，记录 `resolved` 和 evidence_refs；resolved=false 时转错误 Gate |
 
-`ExecutionResult` 不声明是否有代码变化。Runtime 比较输出与 input_commit 的 Git Tree，结合 applicability、Scope 和冲突清单决定 outcome：改动存在且验证通过为 `changed`；无改动且 applicable 为 `no_change`；无改动且 not_applicable 为 `not_applicable`。not_applicable 有任何代码改动、证据缺失或理由为空时为执行错误。执行 Agent 的后续修复调用必须返回完整新 `ExecutionResult`；Runtime 仅采用最终候选对应的结果，旧结果保留为 Invocation 历史。
-
-Pre-Assess 是执行调用中的判断，不另起服务或 Gate。Agent 判断不适用时仍须按配置完成必要检查、Post-Assess 和成果 Gate；明确无法判断必须返回无效/升级结果并进入错误 Gate，不能把不确定映射成 not_applicable。
+`ExecutionResult` 不声明是否适用或是否有代码变化。Runtime 比较最终输出与 input_commit 的 Git Tree，结合 PreAssessReport、Scope 和冲突清单决定 outcome：适用且有改动为 `changed`；适用且无改动为 `no_change`；预检不适用且无改动为 `not_applicable`。修复调用必须返回完整新 `ExecutionResult`；Runtime 只采用最终候选对应的结果，旧结果保留为 Invocation 历史。不适用 Attempt 不产生 ExecutionResult，其 Post-AssessReport 将 execution_result_ref 设为 null 并引用 PreAssessReport。
 
 ## 必要检查与同次修复
 
@@ -213,7 +267,8 @@ Agent 执行 / 解决冲突
     ↓ 固定本轮候选 Tree
 全部必要检查
     ├── 全部通过 → 最终 Checkpoint → 独立只读 Post-Assess → 冻结成果材料
-    ├── 检查失败且还有额度 → 同一 Worker 修复 → 全量重检
+    ├── 检查失败、任务适用且还有额度 → 同一 Worker 修复 → 全量重检
+    ├── 检查失败且任务不适用 → 保留失败报告 → Post-Assess → 成果 Gate
     ├── 额度耗尽且证据完整 → 最终 Checkpoint → 独立只读 Post-Assess → 成果 Gate
     └── 无法执行或材料缺失 → ErrorRecord → 错误 Gate
 ```
@@ -222,14 +277,14 @@ Agent 执行 / 解决冲突
 - 每轮按有效列表顺序执行全部检查，不因测试失败跳过其余项；命令无法启动等执行错误可中止该轮，其余项记 not_run。每项记录 check_id、round（从 1 开始）、evaluated_tree、passed / failed、退出码或 timeout、证据引用及使用环境。
 - 检查在该候选 Tree 的隔离副本运行，可写临时产物；不能把测试生成或修改的受跟踪文件带回成果。任何 Agent 代码修改都会使已有检查结果对新 Tree 失效，需要全量重检。
 - 已启动命令的非零退出或超时属于 failed 证据。命令无法启动、环境不可用或结果证据丢失属于执行错误，不用虚假 failed 结果补齐列表。
-- 检查失败通过 Adapter 续接原生会话反馈，外部 Agent 自行修复；每次续接先返回新的 ExecutionResult。无法安全续接则报错转错误 Gate，不在 Runtime 内实现模型/工具循环。修复轮次用尽后只允许对最终已检查 Tree 生成正式 Checkpoint；代码再变化必须新 Attempt。零项检查记录空清单，不能虚称有测试通过。
+- 任务适用且检查失败时，Adapter 续接执行会话反馈，外部 Agent 自行修复；每次续接先返回新的 ExecutionResult。无法安全续接则报错转错误 Gate，不在 Runtime 内实现模型/工具循环。不适用时没有执行会话，不启动修复；检查结果完整即交成果 Gate。修复轮次用尽后只允许对最终已检查 Tree 生成正式 Checkpoint；代码再变化必须新 Attempt。零项检查记录空清单，不能虚称有测试通过。
 - 每轮日志保存在 Artifact；精简档案保留最终 Tree、有效检查结论、修复次数及各轮证据引用。最终 Checkpoint Tree 必须等于最后一轮 evaluated_tree。
 
 检查修复预算只约束当前 Worker；错误 Gate 创建新 Attempt 或安排上游修复使用独立的 Run 级自动恢复额度。最终 integration.checks 仍须全部通过才可交付。
 
 ### Post-Assess
 
-Post-Assess 由 Adapter 使用同一固定 runner 发起独立调用和新原生会话。输入是最终 Checkpoint、对应 CheckReport、ExecutionResult 与只读审核任务；容器将成果和报告只读挂载，另提供隔离的可写临时目录，不挂载 Git 写入凭据、Git 元数据或 Podman Socket。Runtime 核验候选 Tree 未变化；尝试写入只读成果、退出失败、超时或返回无效结构均为错误 Gate。容器和 Invocation 与执行阶段分别记录，但计入同一 Worker 的 deadline；不创建第二个 Worker。
+Post-Assess 由 Adapter 使用同一固定 runner 发起独立调用和新原生会话。输入是最终 Checkpoint、对应 CheckReport、PreAssessReport、可选 ExecutionResult 与只读审核任务；不适用 Attempt 没有 ExecutionResult。容器将成果和报告只读挂载，另提供隔离的可写临时目录，不挂载 Git 写入凭据、Git 元数据或 Podman Socket。Runtime 核验候选 Tree 未变化；尝试写入只读成果、退出失败、超时或返回无效结构均为错误 Gate。容器和 Invocation 与执行阶段分别记录，但计入同一 Worker 的 deadline；不创建第二个 Worker。
 
 ~~~json
 {
@@ -243,7 +298,7 @@ Post-Assess 由 Adapter 使用同一固定 runner 发起独立调用和新原生
 
 `status` 为 `complete` 或 `concerns`。`concerns` 必须带非空 findings；两种状态都须有非空 summary。报告按 Attempt 的 output_refs 固定为执行证据。`concerns` 不自动判失败，由成果 Gate 审核；只读调用试图改成果、退出失败、超时或返回无效结构均使 Post-Assess 失败，形成 ErrorRecord 并进入错误 Gate。不得重新运行自检来覆盖此前报告。
 
-Post-AssessReport 保存在 `.facetloom/runs/<run-id>/reports/<report-id>.yaml`，`report_type: post_assess`，内容不可变。必需字段为 schema_version、report_id、run_id、combination_id、attempt_id、evaluated_tree、check_report_ref、execution_result_ref、invocation_ref、status、summary、findings、evidence_refs、created_at。发布前校验报告 Tree 等于最终 Checkpoint Tree、输入引用均可读取且匹配摘要；报告自身作为 role=evidence 的 run_record 加入 Attempt.output_refs。
+Post-AssessReport 保存在 `.facetloom/runs/<run-id>/reports/<report-id>.yaml`，`report_type: post_assess`，内容不可变。必需字段为 schema_version、report_id、run_id、combination_id、attempt_id、evaluated_tree、pre_assess_ref、check_report_ref、execution_result_ref、invocation_ref、status、summary、findings、evidence_refs、created_at。invocation_ref 是不含报告自身的不可变调用证据 Artifact；execution_result_ref 在 not_applicable 时为 null，其它 outcome 必须引用有效结果。发布前校验报告 Tree 等于最终 Checkpoint Tree、输入引用均可读取且匹配摘要；报告自身作为 role=evidence 的 run_record 加入 Attempt.output_refs。
 
 ```yaml
 schema_version: 1
@@ -253,12 +308,13 @@ run_id: <run-id>
 combination_id: <combination-id>
 attempt_id: <attempt-id>
 evaluated_tree: <full-tree-oid>
+pre_assess_ref: reports/<pre-assess-report-id>.yaml
 check_report_ref: reports/<check-report-id>.yaml
-execution_result_ref:
+execution_result_ref: null
+invocation_ref:
   type: artifact
-  uri: artifacts://results/<immutable-key>
+  uri: artifacts://invocations/<immutable-key>
   digest: sha256:<digest>
-invocation_ref: <invocation-id>
 status: complete
 summary: 检查报告覆盖最终 Tree，变更符合任务范围。
 findings: []
@@ -309,7 +365,7 @@ created_at: "2026-11-09T12:00:00Z"
 
 仅最终轮次完整、每项均为 passed / failed 时可填写 final_round；全部 passed 则报告 passed，否则为 failed。error / not_run 不能算作已经完成的必要检查。零项检查记录 results=[]，报告 passed 只表示没有待完成的配置检查，不声称执行过测试。
 
-成果 output_refs 必须有 role=evidence 的 run_record 引用指向该 CheckReport；final_round 的 evaluated_tree 必须等于代码输出 Tree，且 repairs_used 不超过预算。检查失败但仍有修复额度时继续修复，不提前进入成果 Gate。检查错误时把报告引用写入 ErrorRecord.evidence_refs，不能把 error 报告包装成完整成果。
+成果 output_refs 必须有 role=evidence 的 run_record 引用指向该 CheckReport；final_round 的 evaluated_tree 必须等于代码输出 Tree，且 repairs_used 不超过预算。任务适用且检查失败、仍有修复额度时继续修复；不适用且检查完整时不修复，保留失败结果交成果 Gate。检查错误时把报告引用写入 ErrorRecord.evidence_refs，不能把 error 报告包装成完整成果。
 
 ## 实际初始输入
 
@@ -317,7 +373,7 @@ Context Snapshot 是有效输入清单；Adapter 实际交给外部 Agent 的初
 
 | 引用 | 所属记录 | 保存时机 |
 | --- | --- | --- |
-| agent_input_ref | Attempt | 启动 Agent 前保存实际初始请求；waiting_gate 前验证持久可读 |
+| agent_input_ref | Attempt | 首次 Pre-Assess 调用前保存实际初始请求；waiting_gate 前验证持久可读 |
 | request_input_ref | GateReport | 调用自动评估器前保存实际初始请求；发布报告前验证持久可读 |
 
 ```yaml
@@ -348,13 +404,13 @@ Adapter 先组装并本地原子保存外部调用输入，再传入同一内容
 各 Gate 审核 → 分项报告与决策 → 全部批准
 ```
 
-进入成果 waiting_gate 前，Runtime 确认全部必要检查有最终代码对应的结果、执行结论已形成、所有引用可读且摘要匹配。检查结束不等于检查通过；预算耗尽后的失败结论可以交由成果 Gate 判断。无法形成必要材料时创建 ErrorRecord，走错误 Gate。
+进入成果 waiting_gate 前，Runtime 确认有效 PreAssessReport、全部必要检查和 Post-Assess 对应最终代码，适用任务还有执行结论，所有引用可读且摘要匹配。检查结束不等于检查通过；预算耗尽或不适用时的完整失败结论可以交由成果 Gate 判断。无法形成必要材料时创建 ErrorRecord，走错误 Gate。
 
 `review_input_digest` 为以下五个字段组成对象按 RFC 8785（JCS）规范化后的 UTF-8 JSON 字节的 SHA-256，格式为 `sha256:<hex>`：
 
 ```json
 {
-  "context_snapshot_ref": "contexts/<sha256>.yaml",
+    "context_snapshot_ref": "contexts/<sha256>.yaml",
   "input_commit": "<full-commit-oid>",
   "outcome": "changed",
   "summary": "实现登录失败限制，执行检查已完成",
@@ -454,9 +510,9 @@ run_record 的路径相对对应运行目录，不得越出目录。Context Snap
 | --- | --- | --- |
 | changed | 输出 Tree 不同于 input_commit 的 Tree | 全部变更满足有效写入范围，冲突已逐项解决 |
 | no_change | 输出 Commit 直接复用 input_commit | 任务适用，已有输入满足目标，无需修改 |
-| not_applicable | 输出 Commit 直接复用 input_commit | ExecutionResult 声明不适用，附原因和证据 |
+| not_applicable | 输出 Commit 直接复用 input_commit | PreAssessReport 声明不适用，附原因和证据 |
 
-比较包含路径、内容和 Git 文件模式，不能仅比较文件列表。输入仍有未解决冲突时不得以 no_change / not_applicable 绕过解决义务。changed 和 no_change 要求 applicability=applicable；not_applicable 要求零变更及有效理由、证据。三种结论都需要最终 CheckReport、只读 Post-Assess 和全部成果 Gate；not_applicable 不删除 DAG 节点或跳过必要检查。
+比较包含路径、内容和 Git 文件模式，不能仅比较文件列表。输入仍有未解决冲突时不得以 no_change / not_applicable 绕过解决义务。changed 和 no_change 要求 PreAssessReport.applicability=applicable；not_applicable 要求预检明确不适用且零变更。三种结论都需要最终 CheckReport、只读 Post-Assess 和全部成果 Gate；not_applicable 不删除 DAG 节点或跳过必要检查。
 
 output_refs 在成果 waiting_gate 前可为空；Attempt 处于 waiting_gate 时必须有且仅有一个 role: code 引用。错误 Gate 不要求代码输出，使用独立 ErrorRecord。outcome 为 changed、no_change 或 not_applicable；不适用结论须有可核对的理由，且经过该 Attempt 的全部 Gate。拒绝、失败或取消的输出不能满足后继。
 

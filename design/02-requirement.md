@@ -368,11 +368,12 @@ accepted、rejected、failed、cancelled 为终态，不因错误处置重新打
 | context_snapshot_ref | 条件 | preparing 时可空；准备成功时固定为 contexts/<sha256>.yaml，按字节摘要校验 |
 | input_commit | 条件 | 与 context_snapshot_ref 一起设置一次，必须等于 Snapshot.input_commit，随后不可变 |
 | agent_input_ref | 条件 | 初始请求形成后设置一次，发送前固定；未形成请求可空 |
+| pre_assess_ref | 条件 | Worker 启动后引用不可变 PreAssessReport 的运行目录相对路径；未形成报告时为空 |
 | status | 是 | 当前 Attempt 状态 |
-| outcome | 条件 | Runtime 按 ExecutionResult 与 Git Tree 判定 changed / no_change / not_applicable；执行失败可空 |
+| outcome | 条件 | Runtime 按 PreAssessReport 与 Git Tree 判定 changed / no_change / not_applicable；执行失败可空 |
 | summary | 条件 | waiting_gate 或终态必填；not_applicable 说明理由 |
-| execution_result_ref | 条件 | 外部 Agent 最终有效 ExecutionResult 的 Artifact；准备失败或结构无效可空 |
-| output_refs | 是 | 初始为空；成果 waiting_gate 时恰有一个 role: code 引用，并引用最终 CheckReport、ExecutionResult、Post-AssessReport 及其他必要证据 |
+| execution_result_ref | 条件 | 外部 Agent 最终有效 ExecutionResult 的 Artifact；not_applicable 或执行未启动时为空 |
+| output_refs | 是 | 初始为空；成果 waiting_gate 时恰有一个 role: code 引用，并引用 PreAssessReport、最终 CheckReport、Post-AssessReport，以及存在时的 ExecutionResult 和其他必要证据 |
 | review_input_digest | 条件 | 成果 waiting_gate 前固定，算法见 Execution；准备失败可空 |
 | gate_report_refs、gate_decision_refs | 是 | 成果 gate_id 到最新报告 / 决定引用的映射，初始空 |
 | status_reason | 条件 | failed / cancelled 必填 |
@@ -389,6 +390,7 @@ status: preparing
 context_snapshot_ref: null
 input_commit: null
 agent_input_ref: null
+pre_assess_ref: null
 outcome: null
 execution_result_ref: null
 summary: null
@@ -413,7 +415,7 @@ updated_at: "2026-11-09T12:00:00Z"
 
 身份创建后不变。preparing 中已形成的部分清单、输入构造结果及错误证据由本地操作记录和 ErrorRecord 引用；不分次改写半成品 Snapshot。准备失败不伪造 input_commit、Snapshot 或输出 Tree。
 
-进入成果 waiting_gate 时 outcome、summary、output_refs、review_input_digest 一并冻结；其引用内容不得追加或替换。审核映射键必须来自 Snapshot 的成果 Gate 列表，目标须匹配同一 Attempt、策略、摘要与输出 Tree。审核期间仅推进状态、时间、状态原因与成果报告/决定引用。
+进入成果 waiting_gate 时 pre_assess_ref、execution_result_ref、outcome、summary、output_refs、review_input_digest 一并冻结；pre_assess_ref 指向的报告须与 output_refs 的 run_record 路径、摘要一致，非空 execution_result_ref 须等于 output_refs 中相应 Artifact 引用。其引用内容不得追加或替换。审核映射键必须来自 Snapshot 的成果 Gate 列表，目标须匹配同一 Attempt、策略、摘要与输出 Tree。审核期间仅推进状态、时间、状态原因与成果报告/决定引用。
 
 worker_ref 属于本地状态，不写入 Git。新 Attempt 最多创建一个 Worker，无法对账的旧 Worker 先确认停止或隔离，再按错误决定恢复；停止意图、原生会话与进程对账见 Services。
 

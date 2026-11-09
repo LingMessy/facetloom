@@ -121,8 +121,8 @@ execution:
 
 1. 人类审阅并在 main 发布 Requirement r1、current、Workflow、Facet、runner、原生配置和审核评估器定义，准备好固定 digest 的镜像与本地凭据。
 2. Runtime 固定 source_commit，生成 DAG，先本地持久化，再发布初始精简档案。代码仍未变。
-3. Runtime 先创建 preparing Attempt，再固定代码输入与 Context Snapshot 转 pending。Adapter 预检容器内外部 Agent，保存实际初始请求和 agent_input_ref，再启动原生调用；版本、argv 与 session_id 保存在 Invocation 中。准备失败直接保存 ErrorRecord，不伪造输入。
-4. 外部 Agent 原生结构化输出经 Adapter 校验并留存 ExecutionResult。Runtime 执行 Workflow 与 Node 累积的必要检查；失败时 Adapter 续接原生会话，每次修复返回新结果，同一 Worker 最多修复并全量重检 2 次。固定最终 Tree 后生成 Checkpoint 和 CheckReport，再以新会话、只读容器运行 Post-Assess；保存 Post-AssessReport、初始请求、bundle 和证据，固定 review_input_digest，进入 waiting_gate 并发布 main。
+3. Runtime 先创建 preparing Attempt，再固定代码输入与 Context Snapshot 转 pending。Adapter 探测外部 Agent、保存预检请求和 agent_input_ref，以独立只读容器运行 Pre-Assess；版本、argv 与 session_id 保存在 Invocation 中。缺少输入进入错误 Gate，风险随报告供成果 Gate 评审。
+4. 预检适用时启动外部 Agent，原生结构化输出经 Adapter 校验并留存 ExecutionResult；不适用时跳过执行并复用输入。Runtime 执行 Workflow 与 Node 累积的必要检查；适用任务失败时 Adapter 可续接会话修复并全量重检，不适用任务不修复但保留完整检查结果。固定最终 Tree 后生成 Checkpoint 和 CheckReport，再以新会话、只读容器运行 Post-Assess；保存预检与自检报告、bundle 和证据，固定 review_input_digest，进入 waiting_gate 并发布 main。
 5. Runtime 并行调度各项 Gate，AI 项使用独立外部 Agent 会话，脚本项直接运行程序；调用前保存实际评估请求，报告通过 request_input_ref 引用。各项报告只作为审核输出发布，不改写执行证据；全部批准和关联状态发布成功后，后继才可执行。
 6. application 与 data 并行，presentation 按稳定顺序三方汇聚，Agent 解决范围内冲突。若成果 Gate 发现缺少锁定到期恢复行为而拒绝，Attempt rejected，节点转错误处置。人类在错误 Gate 选择 repair_upstream，目标为 domain；决定发布后 domain 及其后继 stale，再按依赖重新执行。
 7. 所有节点 satisfied，Run completed。summary 记录结果、返工原因和待改进问题；完成不等于已经交付。
@@ -136,14 +136,13 @@ execution:
 ```json
 {
   "schema_version": 1,
-  "applicability": "applicable",
   "summary": "实现失败计数与锁定剩余时间。",
   "evidence_refs": [],
   "conflict_resolutions": []
 }
 ```
 
-Adapter 只接受各 Agent 已探测支持的原生结构化输出。Runtime 按实际 Git Tree 判断 changed/no_change/not_applicable；Post-Assess 使用独立只读调用。输出无效、Applicability 不确定或只读副本被修改均进入错误 Gate；`concerns` 报告交由成果 Gate 审核。
+Adapter 只接受各 Agent 已探测支持的原生结构化输出。Applicability 来自独立只读 Pre-Assess；Runtime 结合预检与实际 Git Tree 判断 changed/no_change/not_applicable。输出无效、Applicability 不确定或只读副本被修改均进入错误 Gate；Post-Assess 的 `concerns` 报告交由成果 Gate 审核。
 
 ### 自动恢复示例
 
@@ -211,6 +210,9 @@ main
 | 关闭原生审批及内部沙箱 | 容器隔离、Scope、Runtime 检查与 Gate 继续生效 |
 | 检查修复与原生续接不支持 | 前者串行记录每次输入；后者进入错误 Gate，不自建 Agent 循环 |
 | 执行结果无效、Applicability 不确定或与实际 Tree 不符 | 保存 Invocation 和错误证据，进入错误 Gate；不猜测 outcome |
+| Pre-Assess 输入不足 / 有风险 | 阻塞执行转错误 Gate / 固定风险证据供成果 Gate 审核 |
+| Pre-Assess 明确不适用 | 跳过代码执行；必要检查、Post-Assess 和成果 Gate 仍执行 |
+| 不适用且必要检查失败 | 不启动修复；完整失败报告交成果 Gate |
 | Post-Assess 发现问题 / 返回 concerns | 保留报告供成果 Gate 审核，不直接拒绝或接受 |
 | Post-Assess 只读调用改动成果、超时或输出无效 | Attempt 失败并进入错误 Gate；原 CheckReport 和 Checkpoint 保持不变 |
 | 原生成功退出但审核结果无效 | 评估故障，不能当作批准或拒绝 |

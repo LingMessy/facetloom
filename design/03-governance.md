@@ -8,7 +8,7 @@
 | --- | --- | --- |
 | GatePolicy | 模式、上下文和评估器配置 | 成果策略固定在 Context Snapshot；错误策略固定在 run.yaml |
 | ErrorRecord | 不可变错误材料及相关输入、前驱和证据 | main 的运行档案 errors/ |
-| CheckReport / Post-AssessReport | Runtime 实际检查结果与外部 Agent 只读自检报告；均不作 Gate 决策 | main 的运行档案 reports/ |
+| PreAssessReport / CheckReport / Post-AssessReport | 预检、Runtime 实际检查与只读自检证据；均不作 Gate 决策 | main 的运行档案 reports/ |
 | GateReport | AI 建议、自动评估结果或故障证据 | main 的运行档案 reports/；大日志使用 Artifact 引用 |
 | GateDecision | 某项成果审核或错误处置决定 | main 的运行档案 decisions/ |
 | Refinement | 人机筛选记录、落实改进的会话 | 本地 `.runtime/refinements/` |
@@ -201,6 +201,7 @@ flowchart TD
 | 情况 | 路径 |
 | --- | --- |
 | 输入构造失败、上下文冲突、Applicability 未知、Worker 丢失 | failed Attempt → ErrorRecord → 错误 Gate |
+| Pre-Assess 输入不足 / 发现风险 | 输入不足转错误 Gate；风险作为固定证据交成果 Gate，不新增审核项 |
 | 越界冲突、Agent 发现上游需求或行为不对齐 | 保存路径、前驱 ID 与证据 → 错误 Gate |
 | 检查修复次数用尽，但最终代码和失败证据完整 | 成果 Gate，可接受或拒绝，不直接报执行错误 |
 | 成果 Gate Rejected | rejected Attempt → ErrorRecord → 错误 Gate |
