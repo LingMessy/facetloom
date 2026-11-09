@@ -35,7 +35,7 @@ flowchart LR
     F -->|改进并清理已处理记录| L
 ```
 
-Workflow 按 Facet 声明顺序从外到内应用 DAG 节点替换积，例如 `feature ▷ layer ▷ verification`。该运算不满足交换律，因此 Facet 顺序是定义的一部分。`exclude` 在完整组合 DAG 上按节点的 Facet→Node 来源映射匹配；删除命中节点后，只为因此失去的可达关系添加旁路边。具体算法与示例见 [Workflow](01-workflow.md)。
+Workflow 按 Facet 声明顺序从外到内应用 DAG 节点替换积，例如 `feature ▷ layer ▷ verification`。该运算不满足交换律，因此 Facet 顺序是定义的一部分。`exclude` 在完整组合 DAG 上按节点的 Facet→Node 来源映射匹配；删除命中节点后补齐旁路边，再对整个结果做传递约简，保留相同依赖顺序并去除冗余边。具体算法与示例见 [Workflow](01-workflow.md)。
 
 ## 对象与存储
 

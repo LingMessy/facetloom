@@ -8,7 +8,7 @@ FacetLoom 从需求出发，为 Agent 提供明确的上下文与修改范围，
 
 ## 核心模型
 
-Workflow 按 Facet 声明顺序应用节点替换积，每个 Facet 用 DAG 组织上下文 Node。运算从外到内且不满足交换律，因此 Facet 顺序会定义 Combination DAG 的拓扑。`exclude` 在完整 DAG 生成后按 Combination 的 Facet→Node 来源映射匹配；删除命中节点后，只为因此失去的可达关系添加旁路边。Combination 是执行单元，互不依赖的分支可并行，汇聚节点等待全部前驱。
+Workflow 按 Facet 声明顺序应用节点替换积，每个 Facet 用 DAG 组织上下文 Node。运算从外到内且不满足交换律，因此 Facet 顺序会定义 Combination DAG 的拓扑。`exclude` 在完整 DAG 生成后按 Combination 的 Facet→Node 来源映射匹配；删除命中节点后补齐旁路边，再对整个结果做传递约简，保留相同依赖顺序并去除冗余边。Combination 是执行单元，互不依赖的分支可并行，汇聚节点等待全部前驱。
 
 ```text
 Feature: start → Login ────────→ end

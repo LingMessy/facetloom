@@ -258,8 +258,11 @@ flowchart LR
 1. 校验 Facet DAG，并按 `facets` 顺序左折叠节点替换积；规范的组合分组为 `(((F1 ▷ F2) ▷ F3) ... ▷ Fn)`。
 2. 每个业务节点保留完整 `members`，键为 Facet ID、值为该 Facet 的普通 Node ID。虚拟边界不进入 members。
 3. 在完整 DAG 上按 `exclude` 匹配 members，收集全部被排除的实际节点。
-4. 删除命中节点，并做关系桥接：对保留节点或边界 `u`、`v`，若原图有一条 `u → … → v` 路径且所有内部节点都被删除，并且删除后当前图中已不存在 `u` 到 `v` 的路径，则添加 `u → v`。其他保留路径仍可达时不添加捷径；重复边合并。
-5. 校验剩余每个实际节点仍从最外层 start 可达并可达 end，且结果无环。排除全部实际节点或产生无效图时 Workflow 校验失败。
+4. 删除命中节点，保留未删除端点之间的原有边。依据删除前的完整图做关系桥接：对保留节点或边界 `u`、`v`，若存在 `u → … → v` 路径且至少有一个内部节点、所有内部节点都被删除，则补上 `u → v`。候选边统一去重，不根据逐步补边后的可达性决定是否添加。
+5. 对整个结果做传递约简，包括最外层 start/end：若一条边的端点间另有长度至少为 2 的路径，则该边冗余。保持节点集合及全部可达关系，只留下必要的直接依赖。没有 exclude 时也执行约简。
+6. 校验结果无环，剩余每个实际节点仍从 start 可达并可达 end。排除全部实际节点或产生无效图时 Workflow 校验失败。
+
+DAG 的边表达依赖顺序。对固定节点集合，DAG 的传递约简结果唯一，因此最终边集不受节点、边或补边遍历顺序影响。约简只在完整替换积与排除桥接完成后执行，不改变节点替换积本身的定义。
 
 桥接例：
 
@@ -272,7 +275,14 @@ flowchart LR
     D --> T([end])
 ~~~
 
-删除 X、B 后，`A` 与 `D` 失去可达路径，因此添加 `A → D`。若另有保留路径 `A → C → D`，则不添加这条旁路，避免跳过保留节点。
+删除 X、B 后补上 `A → D`。若另有保留路径 `A → C → D`，仍先补边，再由传递约简删除冗余的 `A → D`：
+
+~~~text
+桥接后：A → C → D，另有 A → D
+约简后：A → C → D
+~~~
+
+在全部前驱满足才执行的语义下，冗余边不会让 D 跳过 C；约简使图与直接前驱集合统一、精简。
 
 Combination ID 使用 Workflow ID 和按声明顺序排列的 `members` 稳定编码，例如：
 
@@ -280,11 +290,11 @@ Combination ID 使用 Workflow ID 和按声明顺序排列的 `members` 稳定�
 development/feature:login/layer:domain
 ~~~
 
-只有所有直接前驱的 CombinationRun 都为 satisfied，节点才可运行。互不依赖的就绪分支可并行；汇聚节点等待全部直接前驱。
+调度和代码输入汇聚统一使用最终约简 DAG 中的直接前驱。只有所有业务直接前驱的 CombinationRun 都为 satisfied，节点才可运行。互不依赖的就绪分支可并行；汇聚节点等待全部直接前驱。
 
 ## 运行快照
 
-生成后的完整图先在本地持久化，再作为精简运行档案发布到 main：
+完成排除、桥接和传递约简的最终图先在本地持久化，再作为精简运行档案发布到 main：
 
 ~~~text
 .facetloom/runs/<run-id>/dag.yaml
@@ -316,4 +326,4 @@ edges:
   - {from: development/feature:login/layer:application, to: end}
 ~~~
 
-每个业务节点的 `members` 必须列出 Workflow 中每个 Facet 的 Node ID，顺序遵循 `facets` 声明顺序，并与 Combination ID 一致；控制节点不含 `members`。先按 Combination ID 排列业务节点、按 `(from, to)` 排列边并去重，再以固定字段顺序、UTF-8 和 LF 写出 YAML。`dag_digest` 对实际写入的完整文件字节求 SHA-256。相同定义必须生成相同 DAG；后续定义变化、重启和重试都不能改写该快照。
+每个业务节点的 `members` 必须列出 Workflow 中每个 Facet 的 Node ID，顺序遵循 `facets` 声明顺序，并与 Combination ID 一致；控制节点不含 `members`。传递约简后，按 Combination ID 排列业务节点、按 `(from, to)` 排列边，再以固定字段顺序、UTF-8 和 LF 写出 YAML。`dag_digest` 对实际写入的完整文件字节求 SHA-256。相同定义必须生成相同 DAG；后续定义变化、重启和重试都不能改写该快照。

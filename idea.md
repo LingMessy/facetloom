@@ -150,7 +150,7 @@ Combination Facet 在 Workflow 版本内固定。Requirement 启动时创建该 
 
 ### 3.5 定义阶段条件过滤
 
-Workflow 按声明顺序对 Facet DAG 应用节点替换积，先生成完整 Combination DAG，再按节点来源映射应用静态排除。删除中间节点后，只为因此失去的可达关系添加旁路边。固定后的 DAG 随 WorkflowRun 保存；Requirement 运行时的 Pre-Assess 不改变图结构。
+Workflow 按声明顺序对 Facet DAG 应用节点替换积，先生成完整 Combination DAG，再按节点来源映射应用静态排除。删除中间节点后补齐旁路边，再对整个结果做传递约简，保留相同依赖顺序并去除冗余边。固定后的 DAG 随 WorkflowRun 保存；Requirement 运行时的 Pre-Assess 不改变图结构。
 
 例如：
 

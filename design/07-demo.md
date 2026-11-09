@@ -36,7 +36,7 @@ flowchart LR
     ND --> NP[notification × presentation]
 ```
 
-Feature 分支可并行；每个 Feature 的 application 与 data 在 domain 满足后并行，presentation 汇聚二者。排除 `notification × application` 后，`notification × domain → notification × data → notification × presentation` 仍可达，因此无需添加旁路边。只有删除节点后某个原有上下游关系不再可达时才补边，避免跳过保留节点。控制边界和其余规则见 [Workflow](01-workflow.md)。
+Feature 分支可并行；login 的 application 与 data 在 domain 满足后并行，presentation 汇聚二者。排除 `notification × application` 后，先补上 `notification × domain → notification × presentation`；由于保留路径 `domain → data → presentation` 已表达该顺序，传递约简再删除这条冗余边。上图展示最终约简结果，notification 的 presentation 只需直接汇聚 data 的输出。控制边界和其余规则见 [Workflow](01-workflow.md)。
 
 Verification Facet 可增加节点级验证，其边只约束其余 Facet 选择相同的组合，不自动构成全局验证屏障。最后的整体检查由 integration.checks 执行。
 
@@ -152,7 +152,9 @@ main
 | 无效 Facet、排除引用或图有环 | 创建 Run 前拒绝 |
 | 相同定义、不同 clone | 稳定 Combination ID 和 DAG，不同 Run ID |
 | 无依赖分支、汇聚 | 并行执行，汇聚等待全部前驱 |
-| 排除中间 Combination | 添加跨被排除节点的旁路边，保留原有可达关系 |
+| 排除中间 Combination | 统一补边后传递约简，保持剩余节点间原有可达关系 |
+| 无 exclude 但存在冗余边 | 同样进行传递约简，调度与汇聚使用最终直接前驱 |
+| 改变节点、边及补边遍历顺序 | 最终边集与 DAG 摘要一致 |
 | Runtime 重启、Worker 丢失 | 本地对账；无法恢复则 blocked，人工确认重试 |
 | 不同 Run 同时推送 | 刷新后自动追加，互不覆盖 |
 | Node 未声明 Gate / 仅声明部分字段 | 继承 Workflow 默认，mode 缺省 human；审核上下文累积且可追溯 |

@@ -22,11 +22,11 @@ CLI 随各阶段提供可操作的验证入口。每阶段完成验收后进入�
 
 **依赖：** 当前设计规范。
 
-**交付物：** Requirement 与 current.yaml、Workflow、Facet、Scope 和评估器定义的解析与校验；有序节点替换积、静态排除与旁路、稳定 Combination ID 和 DAG 快照；CLI 定义校验与图预览。
+**交付物：** Requirement 与 current.yaml、Workflow、Facet、Scope 和评估器定义的解析与校验；有序节点替换积、静态排除、旁路与传递约简、稳定 Combination ID 和 DAG 快照；CLI 定义校验与图预览。
 
 **验收条件：**
 
-- 相同定义生成相同 DAG；Facet 顺序、分支、汇聚和排除后的关系符合设计。
+- 相同定义生成相同 DAG；Facet 顺序、分支、汇聚和排除后的关系符合设计；补边遍历顺序不影响最终约简边集。
 - 错误引用、环、悬空节点及全部节点被排除时拒绝生成运行；能查看每个 Combination 的 Gate 继承结果，评估器缺失或错配可定位。
 
 ## 2. 单 clone 执行

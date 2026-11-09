@@ -98,7 +98,7 @@ B 获取最新头，检查自己的预期输入
 
 ### 本地代码与持久证据
 
-根输入来自 source_commit，汇聚输入来自直接前驱当前有效输出。活动 Worktree 锚定需要的本地 Commit；关闭前保证有后继 Worktree 或已验证的持久 bundle。记录发布前上传所需 Artifact，验证 bundle 在空仓库中可恢复输入与输出。不用额外命名分支维持快照。
+根输入来自 source_commit，汇聚输入来自最终约简 DAG 快照的直接前驱当前有效输出。活动 Worktree 锚定需要的本地 Commit；关闭前保证有后继 Worktree 或已验证的持久 bundle。记录发布前上传所需 Artifact，验证 bundle 在空仓库中可恢复输入与输出。不用额外命名分支维持快照。
 
 正式成果交付时，保留最新 main 档案，在其上应用已接受代码变更并校验 project_tree。运行完成和交付分别记录；交付回执写入后续 Commit。
 
