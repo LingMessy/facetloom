@@ -79,6 +79,18 @@ Git 分支只有 `main`。DAG 分支由独立 Worktree 执行；输入与 Checkp
 
 每位协作者在自己的 clone 创建不同 `run_id`。同一 Run 由创建它的 Runtime 推进；协作者同步 main 查看已发布档案，向拥有者提交审核请求。首阶段不支持跨 clone 接管活动 Worker。
 
+## 本地生效与 Git 同步
+
+所有项目使用相同规则：**通过校验的提交进入本地 main 后生效，Git remote 仅用于异步同步。** 无需配置 remote 即可完成需求、Gate、交付与精炼；外部 Agent 是否联网由 runner 决定。
+
+```text
+本地状态 → 校验并提交本地 main → 决策或交付生效
+                               ↓ 用户按需 push / 获取并合并
+                        其它 clone 接纳更新后重新检查
+```
+
+推送失败只表示尚未同步，不撤销本地结果，也不阻止后续本地操作。同步前各 clone 可能持有不同需求与成果；系统根据当前 clone 已知的 main 判断有效性，不能即时获知其它人的修改。同步后检查需求取代、运行替代与输入变化；历史决策和交付继续保留。分叉合并保留原提交，文本或业务冲突需明确解决，不通过重写历史改变固定引用。完整协议见 [Services](05-services.md#git-异步同步)。
+
 ## 本地优先的证据协作
 
 通常，一个需求由协作者在自己的 clone 中执行，产生的 Artifact 主要用于该 clone 内的审核、排错和恢复。只有跨人复核、问题移交等少数场景需要分享原始材料。因此，Artifact 默认本地持久保存，跨 clone 共享通过显式导出和导入完成，无需为日常运行部署共享存储服务。
@@ -123,6 +135,7 @@ Artifact URI 标识内容，不是下载地址。发布档案前只要求发布�
 │   ├── reports/<report-id>.yaml           # CheckReport / GateReport / IntegrationReport
 │   └── deliveries/<delivery-id>.yaml
 └── .runtime/                             # 加入 gitignore
+    ├── identity.yaml                     # 当前 clone 的稳定 runtime_id
     ├── runs/<run-id>/                    # 完整状态、待发布记录、delivery.yaml 交付意图
     ├── transactions/<operation-id>/       # 事务清单、载荷与提交标记
     ├── locks/
@@ -154,5 +167,5 @@ Artifact URI 标识内容，不是下载地址。发布档案前只要求发布�
 
 - **当前有效成果**：CombinationRun 的 `accepted_attempt_id` 指向的输出；历史 accepted Attempt 不一定仍有效。
 - **运行完成**：所有业务 CombinationRun 都为 `satisfied`，不表示已经交付。
-- **已发布档案**：main 上最近一次共享的状态；界面须与本地实时状态区分。
+- **已发布档案**：已提交本地 main 的精简状态；与本地实时状态、远端同步状态分别展示。
 - **精炼**：Refinement，目标是减少当前目录与 Agent 上下文中的已处理记录，不清除 Git 历史。

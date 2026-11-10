@@ -48,7 +48,7 @@ main 暂不可写时，本地保存待发布操作。发布 waiting_gate 前不�
 
 ## Context Snapshot
 
-路径：`.facetloom/runs/<run-id>/contexts/<sha256>.yaml`。先在本地运行目录构造，发布 Gate 材料时同步到 main。文件按字节 SHA-256 命名，输入变化创建新文件与新 Attempt。
+路径：`.facetloom/runs/<run-id>/contexts/<sha256>.yaml`。先在本地运行目录构造，发布 Gate 材料时提交到本地 main。文件按字节 SHA-256 命名，输入变化创建新文件与新 Attempt。
 
 ```yaml
 schema_version: 1
@@ -562,7 +562,7 @@ artifacts:
 
 1. **导出**：用户选择已发布 Run 或其中的记录，固定所在 Commit、路径和摘要。沿 run_record、git_file、git_object 的恢复来源及 Artifact 的 dependency_refs 收集完整传递依赖；已访问对象去重，拒绝非法循环。结构化对象的依赖须与其已识别 Schema 中的类型化引用一致，不靠任意文本匹配推断。任何必要记录或 Artifact 缺失时列出缺项，整包导出失败，不生成看似完整的包。
 2. **形成文件**：仅写所需 Artifact 字节，不打包整个 `.runtime/`、活动状态或凭据。文件写入临时路径，全部验证并持久化后原子改名到用户指定路径。固定 Git 记录仍经正常 Git 同步；交换包清单不代替这些记录。
-3. **校验**：接收方先同步并核对 source_records；所需 Commit 或记录缺失时要求先同步。核对传递依赖与包内清单、大小和逐文件摘要，拒绝缺项、多余文件、重复条目、重复摘要，以及非普通文件、链接、绝对或越界路径。只流式读取规定的成员，不将 tar 任意解压到目标目录。清单大小、文件数和总字节数受本地资源上限限制，导入前展示总量；不套用单次 Agent 证据的 10 MiB / 100 MiB 限额，以允许较大的 Git bundle。
+3. **校验**：接收方核对本地已持有的 source_records；仅在所需 Commit 或记录缺失时才要求先同步相应 Git 历史，不强制联网。核对传递依赖与包内清单、大小和逐文件摘要，拒绝缺项、多余文件、重复条目、重复摘要，以及非普通文件、链接、绝对或越界路径。只流式读取规定的成员，不将 tar 任意解压到目标目录。清单大小、文件数和总字节数受本地资源上限限制，导入前展示总量；不套用单次 Agent 证据的 10 MiB / 100 MiB 限额，以允许较大的 Git bundle。
 4. **导入**：全部内容校验通过后，在本地事务中一次提交新 entry 与整包回执；重复内容重新校验后复用。中断前未提交的内容不可用，已提交事务重放完成；任何失败都不发布有效的部分导入结果，既有对象不受影响。
 
 清单及内容都作为不可信输入读取；摘要证明内容匹配，不代表其成果已经批准。导入不执行脚本、不更新 main、不接管 Worker，也不创建或恢复运行。代码恢复由后续显式操作完成，并按 Git bundle 规则重新验证。
@@ -578,7 +578,7 @@ artifacts:
 | 本地精炼会话、未完成事务或导入/导出正在使用 | 暂时保护；完成或显式结束后重新评估 |
 | 仅 Git 历史记录依赖，或已确认无引用 | 人工预览、确认后可 purge；历史内容将无法在本地取回 |
 
-purge 先刷新 main，扫描当前保留记录与全部本地使用者的传递依赖，生成包含对象、字节数、历史影响和阻止原因的预览。无法完成引用检查时不允许删除；预览后有新引用或状态变化须重新计算并确认，不依靠“Run 已完成”判断。
+purge 先重新读取本地 main，扫描当前保留记录与全部本地使用者的传递依赖，生成包含对象、字节数、历史影响和阻止原因的预览。无需联网或获取远端更新，也不承诺检查其它 clone 尚未同步的引用。无法完成本地引用检查时不允许删除；预览后有新引用或状态变化须重新计算并确认，不依靠“Run 已完成”判断。
 
 确认后先持久化本地回执，记录 operation_id、对象摘要、操作者、原因、确认范围摘要及进度，再逐项删除文件和有效 entry 并验证。新引用、导入/导出和删除使用同一库锁协调；锁内重新检查保护范围。中断后按回执重放，已不存在的目标按已删除处理；删除失败保留待完成状态，不虚报成功。并发锁及重放职责见 [Services](05-services.md)。
 
@@ -649,6 +649,8 @@ output_refs 在成果 waiting_gate 前可为空；Attempt 处于 waiting_gate �
 
 ## 输入比较与集成交付
 
+交付以通过检查及人类确认的代码提交进入本地 main 为成功边界；有无 remote 使用相同规则。push/pull 只同步 Git 历史，不参与交付状态，也不要求每次交付先 fetch。同步后合并的新代码不继承原候选的通过结论，需要验证时创建新 Run。
+
 定义 `project_tree(commit)`：保留该 Commit 的所有被 Git 跟踪的路径、内容和模式，仅移除 `.facetloom/runs/` 子树以及移除后为空的目录。定义、资料和代码均在比较范围内。运行档案不作为项目定义或代码输入；只向执行者和审核者提供明确引用的前驱结果、修复决策或评估证据，不挂载整个档案目录。
 
 ```text
@@ -664,7 +666,7 @@ output_refs 在成果 waiting_gate 前可为空；Attempt 处于 waiting_gate �
 ```
 
 1. 所有业务 Combination satisfied 后 Run 为 completed。Runtime 汇聚终端有效输出；冲突阻塞交付，不静默覆盖。
-2. 获取最新 main；确认无 delivery_abandonment，验证 current 指针和 `project_tree(main) == project_tree(source_commit)`。需求过期或正式输入不同则拒绝旧运行交付。
+2. 读取本地 main 最新头；确认无 delivery_abandonment，验证 current 指针和 `project_tree(main) == project_tree(source_commit)`。本地已知需求过期或正式输入不同则拒绝旧运行交付。
 3. 在隔离 Worktree 中把成果相对 source_commit 的代码变更应用到最新 main，保留最新 `.facetloom/runs/`。变化范围仍受既定执行范围约束。
 4. 执行 Workflow 的全部 integration.checks，保存不可变 IntegrationReport。检查可写临时产物，但不能改变被检查的候选输入。
 5. 人类确认固定报告与候选；Git Manager 检查当前头及已有交付。存在代码差异时创建以最新头为唯一父提交的集成 Commit，再追加回执；无差异时只发布 no_change 回执。
@@ -752,7 +754,7 @@ confirmation: null
 result_commit: null
 ~~~
 
-状态为 preparing → ready → confirmed → publishing → delivered；尚未形成候选、检查失败或正式输入变化时为 blocked。blocked 在条件恢复后可重新准备；结果未知时保持 publishing，完成对账之前不新建交付。候选或报告变化清空旧确认，delivery_id 不用于另一份不同成果的交付。
+状态为 preparing → ready → confirmed → publishing → delivered；publishing 指正在将候选提交到本地 main，与远端同步无关。尚未形成候选、检查失败或正式输入变化时为 blocked。blocked 在条件恢复后可重新准备；本地提交结果未知时保持 publishing，完成对账之前不新建交付。候选或报告变化清空旧确认，delivery_id 不用于另一份不同成果的交付。
 
 人类确认记录 `confirmed_by`、`confirmed_at`，并固定以下对象的 JCS SHA-256 摘要为 confirmation.digest：
 
@@ -776,14 +778,14 @@ result_commit: null
 
 ```text
 固定报告与候选 → 人类确认并持久化
-    ↓ 刷新 main，查已有交付，再次校验正式输入
+    ↓ 读取本地 main，查已有交付，再次校验正式输入
 只有档案变化 → 保留档案，复用确认
 正式输入变化 → blocked，要求新 Run
     ↓
-正常推送 → 对账结果 → 发布回执
+提交本地 main → 对账结果 → 提交回执
 ```
 
-Runtime 串行安排交付，Git Manager 在仓库发布锁下重新读取 main，再正常 fast-forward Push。推送被拒后先对账是否已经成功；未成功且仅档案变化时使用同一 delivery_id 重构提交，不能覆盖并发正式代码。
+Runtime 串行安排交付，Git Manager 在仓库发布锁下重新读取本地 main，再按 [Services](05-services.md#本地提交生效) 的预期头和工作目录保护规则提交。本地更新结果未知时先对账是否已经成功；未成功且仅档案变化时使用同一 delivery_id 重构尚未生效的提交，不能覆盖并发正式代码。已生效交付即使 push 失败也不回退到 publishing。
 
 重复点击或请求重放返回同一活动意图；已经有成功 DeliveryRecord 或匹配的交付提交时直接返回结果。即使请求带不同 operation_id，也不能为同一 Run 重复交付。同步到档案被精炼删除的状态时，仍通过 Git 历史 Trailer 查已完成交付。
 
@@ -821,6 +823,6 @@ applied_at: "2026-11-06T13:10:00Z"
 
 ID 为 UUIDv4，文件名为 deliveries/<delivery-id>.yaml。applied 时 target_head_before 是实际集成父提交；no_change 时 result_commit、target_head_before 与 verified_main_commit 都是回执提交前验证的 main 头。verified_main_commit 是对 current 指针与正式输入做最后校验的 Commit；不要求等于 source_commit 或 Report 记录的早期目标头。applied_by、confirmed_at 来自已持久化的人类确认，confirmation_digest 可用回执及其报告重新计算；applied_at 为回执中登记的 UTC 时间；成功须由 main 可达的集成提交或 no_change 回执确认，不能仅凭本地时间判断。
 
-applied 推送成功后崩溃，通过 Trailer 找到结果，验证 project_tree(result_commit)=candidate_tree 及已持久化的人类确认，再补回执。no_change 回执本身就是成功记录，按同一 delivery_id 和操作 ID 对账，不再应用代码。无法确认结果或人类确认依据时等待人工处理，不重复交付。
+applied 的集成提交进入本地 main 后崩溃，通过本地历史 Trailer 找到结果，验证 project_tree(result_commit)=candidate_tree 及已持久化的人类确认，再补回执。no_change 回执本身就是成功记录，按同一 delivery_id 和操作 ID 对账，不再应用代码。无法确认结果或人类确认依据时等待人工处理，不重复交付。已完成交付是否已推送单独展示，不改变成功事实。
 
 成功后即使 main 又发生代码变化，该 Run 也不再次交付；需要重新应用成果时创建新 Run。所有回执引用的报告、候选和确认依据都受 Refinement 的引用与保留规则约束，不能在补回执期间清理。

@@ -54,7 +54,7 @@ Front matter 中 `schema_version`、`requirement_id`、`version`、`supersedes` 
 
 ## `current.yaml`
 
-项目受保护主分支（本文以 `main` 为例）上的 `.facetloom/requirements/<requirement-id>/current.yaml` 是该需求系列唯一的当前版本指针。隔离 Worktree 中的同名文件可能是旧快照，不用于判断当前版本：
+当前 clone 的主分支（本文以 `main` 为例）上的 `.facetloom/requirements/<requirement-id>/current.yaml` 是该需求系列的当前版本指针。隔离 Worktree 中的同名文件可能是旧快照，不用于判断当前版本；其它 clone 的更新通过 Git 同步后才在本地可见：
 
 ```yaml
 schema_version: 1
@@ -64,7 +64,7 @@ current_version: r1
 
 `schema_version` 必须为 `1`；`requirement_id` 和 `current_version` 均必需。`current_version` 是版本文件名，不含扩展名；它必须指向同目录中 ID 匹配的已提交版本文件。该文件不保存版本历史、需求状态或运行状态。
 
-创建首个版本时，同一 Git Commit 添加版本文件和指针。发布后续版本时，同一 Commit 添加新版本文件并更新指针；新版本的 `supersedes` 必须等于更新前的 `current_version`。指针只能前进到新发布且取代当前版本的定义，不能直接回退；恢复旧语义时发布一个取代当前版本的新版本。提交须基于远端主分支最新头；非快进更新被拒绝后，须重新检查当前指针，不能静默覆盖。
+创建首个版本时，同一 Git Commit 添加版本文件和指针。发布后续版本时，同一 Commit 添加新版本文件并更新指针；新版本的 `supersedes` 必须等于更新前的 `current_version`。指针只能前进到新发布且取代当前版本的定义，不能直接回退；恢复旧语义时发布一个取代当前版本的新版本。提交基于本地 main 的最新头并校验原指针，进入本地 main 即生效，不等待 push。不同 clone 并发发布的版本在同步时按 Services 的业务冲突规则解决，不能静默覆盖或承诺全局唯一的版本分配。
 
 ```mermaid
 flowchart LR
@@ -72,7 +72,7 @@ flowchart LR
     R2 -->|同步 clone| C[取消旧版本未终态运行]
 ```
 
-只有主分支 `current.yaml` 指向的版本可启动新 WorkflowRun、推进有效成果或集成交付。旧版本仍可发布取消、失败及历史证据档案，不能借归档恢复执行或接受新成果。WorkflowRun 启动时固定包含该版本的 `source_commit`。其他 clone 同步到新指针后，停止并取消旧版本的未终态运行；已接受成果保留为历史，不得进入新版本。生效发布或集成前刷新 main 并再次校验指针；取消与历史归档按 Services 的发布分类处理。仅运行档案变化不使成果失效；其余输入变化则需新 Run。不同运行的档案使用各自 run_id 目录。
+只有本地 main 的 `current.yaml` 指向的版本可启动新 WorkflowRun、推进有效成果或集成交付。旧版本仍可发布取消、失败及历史证据档案，不能借归档恢复执行或接受新成果。WorkflowRun 启动时固定包含该版本的 `source_commit`。其他 clone 将新指针同步到自己的 main 后，停止并取消自己拥有的旧版本未终态运行；已接受成果保留为历史，不得进入新版本。生效发布或集成前重新读取本地 main 并校验指针，不强制 fetch。仅运行档案变化不使成果失效；其余输入变化则需新 Run。同步前已发生的决策或交付照实保留，不声称已阻止另一 clone 的未知操作。取消与历史归档按 Services 的发布分类处理，不同运行的档案使用各自 run_id 目录。
 
 ## WorkflowRun
 
@@ -88,7 +88,7 @@ WorkflowRun 的必需字段如下：
 | `run_id` | 是 | UUIDv4 运行 ID；创建后不变。 |
 | `requirement_version_id` | 是 | 固定的 Requirement Version ID。 |
 | `source_commit` | 是 | 同一仓库中定义与根代码基线的不可变 Git Commit。 |
-| `replaces_run_id` | 是 | 本 Run 替代的旧 WorkflowRun；普通新运行填 `null`。非空时须指向同一项目内已发布且未终态的 Run，且只能有一个未终态替代 Run。 |
+| `replaces_run_id` | 是 | 本 Run 替代的旧 WorkflowRun；普通新运行填 `null`。非空时须指向本地 main 已发布且未终态的同项目 Run；本地可见历史中最多一个有效的未终态替代 Run。不同 clone 的竞争替代在同步时协调，不提供全局锁。 |
 | `requirement_path` | 是 | `source_commit` 中 Requirement Version 文件的仓库相对路径。 |
 | `current_pointer_path` | 是 | `source_commit` 中 `current.yaml` 的仓库相对路径；启动时验证其指向 `requirement_version_id`。 |
 | `workflow_id` | 是 | `source_commit` 中使用的 Workflow 稳定 ID。 |
@@ -107,11 +107,11 @@ WorkflowRun 的必需字段如下：
 
 启动流程：
 
-1. 获取 main 最新头，固定完整 OID 为 `source_commit`。
+1. 读取本地 main 最新头，固定完整 OID 为 `source_commit`；无需配置 remote 或先 fetch。
 2. 校验 current 指针、Requirement、Workflow、Facet、必要检查、执行与评估的 runner、成果及错误 Gate 策略、评估器配置和引用资料；拒绝引用运行档案作为定义或资料输入。
-3. 生成并校验 DAG。若为替代运行，刷新 main 并验证目标 Run 已发布、未终态且尚无替代 Run；并发冲突时重新读取并拒绝重复替代。将 `replaces_run_id`、run.yaml、dag.yaml 和初始状态原子持久化到本地，再发布初始精简档案到 main。
-4. `replaces_run_id` 非空时，若旧 Run 由当前 Runtime 拥有，则新 Run 初始档案发布成功后立即取消旧 Run；若由其它 clone 拥有，旧 Run 的所属 Runtime 在下次同步 main 并看到替代关联时停止、取消旧 Run。新 Run 发布失败时不得先取消旧 Run；Git 不提供跨 clone 的即时取消通知。
-5. 再次同步检查 current 指针。需求已过期则取消；否则调度节点。仅运行档案的提交不影响固定输入。
+3. 生成并校验 DAG。若为替代运行，重新读取本地 main 并验证目标 Run 已发布、未终态且尚无有效未终态替代 Run；本地并发冲突时重新读取并拒绝重复替代。将 `replaces_run_id`、run.yaml、dag.yaml 和初始状态原子持久化到本地，再提交初始精简档案到本地 main。
+4. `replaces_run_id` 非空时，若旧 Run 由当前 Runtime 拥有，则新 Run 初始档案提交本地 main 后立即取消旧 Run；若由其它 clone 拥有，旧 Run 的所属 Runtime 在下次接纳替代关联时停止、取消仍未终态的旧 Run。已经完成或取消的旧 Run 保留历史，不回写终态。新 Run 发布失败时不得先取消旧 Run；Git 不提供跨 clone 的即时取消通知。
+5. 再次读取本地 main 检查 current 指针与正式输入。需求已过期则取消，输入变化则不再推进旧 Run；否则调度节点。仅运行档案的提交不影响固定输入。
 
 输入、`replaces_run_id`、`runners`、`error_gate`、`merge_engine` 和 `owner_runtime_id` 创建后不变；状态、原因与更新时间可推进。main 的记录提交不能修改 `source_commit`。交付基线规则见 [Execution](04-execution.md)。
 
@@ -142,7 +142,7 @@ stateDiagram-v2
     cancelled --> [*]
 ```
 
-本地记录保存实时状态，main 显示最近已发布状态。待发布决定不算已生效；Run / 节点状态的生效视图与本地 outbox 分开保存，防止未推送的批准解锁后继。Worker 的开始与结束在本地持久化后再推进；等待 Gate、Gate 决策、失败、取消、运行完成与交付是档案发布节点。未发布操作重启后重放，不能因 Git 推送失败而丢失。全部 Gate 批准须发布成功后才满足后继依赖。
+本地记录保存实时状态，本地 main 显示最近已发布状态。待提交决定不算已生效；Run / 节点状态的生效视图与本地 outbox 分开保存，防止尚未进入 main 的批准解锁后继。Worker 的开始与结束在本地持久化后再推进；等待 Gate、Gate 决策、失败、取消、运行完成与交付是档案发布节点。未提交操作重启后对账并重放；全部 Gate 批准提交本地 main 后才满足后继依赖。尚未推送不等于未生效，不阻塞后继、不重放已完成操作。同步状态不进入运行状态机。
 
 ## 运行档案
 
@@ -432,7 +432,8 @@ worker_ref 属于本地状态，不写入 Git。新 Attempt 最多创建一个 W
 | --- | --- |
 | Runtime 重启 | 先恢复已提交文件事务，再对账 Worker、评估任务和待发布操作，最后恢复调度 |
 | Worker 无法对账 | Attempt failed，创建 ErrorRecord，按错误 Gate 决定恢复 |
-| main 推送失败 | 本地保留待发布操作；对账后重试，不提前解锁或重复恢复 |
+| 本地 main 提交失败或结果未知 | 保留待发布操作，按本地历史对账后重试，不提前解锁或重复恢复 |
+| main 推送失败或暂时离线 | 本地已生效结果保留，仅同步未完成；后续显式同步，不重放业务操作 |
 | 本地状态丢失 | 从 main 恢复已发布档案，Artifact 另从保留库或交换包恢复；不保证恢复未发布操作或活动 Worker，通常新建 Run |
 | 另一 clone 查看 | 读取 main 摘要；所需 Artifact 未持有时先导入交换包，再从其中的 Git bundle 恢复代码，不接管活动 Worker |
 

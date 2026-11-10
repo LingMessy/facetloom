@@ -1,6 +1,6 @@
 # Services
 
-服务实现 [Requirement](02-requirement.md)、[Governance](03-governance.md) 和 [Execution](04-execution.md) 的协议。本地执行状态与 main 已发布档案各自有明确边界。
+服务实现 [Requirement](02-requirement.md)、[Governance](03-governance.md) 和 [Execution](04-execution.md) 的协议。本地执行状态、本地 main 已生效档案与 Git 同步状态分别管理。
 
 ## 组件关系
 
@@ -39,8 +39,11 @@ flowchart LR
 
 创建 Attempt、变更状态、接收取消和准备交付，先在本地原子持久化。每个 clone 独立限制并发；同一 Run 由创建它的 Runtime 写入。其它 clone 只读同步，或经拥有者受信接口提交人类操作；首阶段不实现活动运行接管和远程实时状态共享。
 
+Runtime 首次使用 clone 时生成 UUIDv4，保存为 `.runtime/identity.yaml` 的 `runtime_id`，后续启动复用。它是运行拥有者标识，不是人类身份或授权凭据。新 clone 生成自己的身份；同一 Git common directory 的 linked Worktree 共用原 clone 的 Runtime、身份与状态目录，不创建第二个调度者。
+
 ```text
 .facetloom/.runtime/
+├── identity.yaml             # schema_version: 1、runtime_id；不进入 Git
 ├── runs/<run-id>/             # 完整状态、不可变快照和待发布操作
 ├── transactions/<operation-id>/ # manifest、payloads、COMMITTED、APPLIED
 ├── worktrees/<attempt-id>/    # detached Worktree
@@ -117,12 +120,12 @@ side_effects:
 ```
 
 - 同一 aggregate 的后续事务只能在前一事务 APPLIED 后创建，故恢复时不存在合法的越序覆盖。恢复完毕前不启动新 Worker。
-- 启动 Worker、评估请求、Artifact 导入/导出/清理及 Git 推送都先持久化意图。容器按稳定 worker ID 查询；调用按 report ID / 请求摘要对账；Artifact 按内容摘要及本地操作回执校验；Git 按操作 Trailer 与目标内容校验。
-- 推送确认丢失时先刷新 main、在历史中查找操作 ID。即使 Refinement 已清理当前档案，也不能重新追加已执行操作或复活旧记录。
+- 启动 Worker、评估请求、Artifact 导入/导出/清理及 Git 提交都先持久化意图。容器按稳定 worker ID 查询；调用按 report ID / 请求摘要对账；Artifact 按内容摘要及本地操作回执校验；Git 按本地 main 的操作 Trailer 与目标内容校验。
+- 本地 main 更新结果未知时先在历史中查找操作 ID。即使 Refinement 已清理当前档案，也不能重新追加已执行操作或复活旧记录。push 确认丢失只需核对远端是否已含原提交，不重放业务操作。
 - 外部动作状态为 pending / running / succeeded / failed / unknown / cancelled，确认失败记录原因并等待重试或人工处理；状态变化也通过文件事务保存。恢复动作的扣减、状态和 outbox 同事务提交，重放不重复扣减；取消后不返还已安排额度。
 - 错误恢复 Worker 依赖相应决定成功发布；同一 Run 的发布队列按 sequence 串行推进；成果接受及交付也等待对应 main 提交确认。普通 Worker 的启动不要求每个内部状态都提交 Git。
 - 无幂等接口且发送结果未知时，先保留 unknown 并对账；无法确认则等待人类，不自动重发，不保证网络调用恰好执行一次。
-- APPLIED 事务仅在所有外部动作已对账并完成后才可回收；保留本地操作 ID 去重索引。共享发布结果仍以 Git 历史 Trailer 校验，不以可选 SQLite 为唯一依据。
+- APPLIED 事务仅在所有必要动作已对账并完成后才可回收；保留本地操作 ID 去重索引。发布结果仍以本地 Git 历史 Trailer 校验，不以可选 SQLite 为唯一依据，也不等待远端同步。
 
 ## Gate 评估协调
 
@@ -155,7 +158,22 @@ Git Manager 是唯一执行受信 Git 写入的组件；管理 main、隔离 Wor
 | 集成交付 | current、project_tree、有效终端输出、可恢复候选、通过的 Report、绑定确认、已有交付与活动 delivery_id |
 | Refinement 提交 | 来源与目标摘要、确认 Diff、验证结果、清理引用完整性 |
 
-发布档案使用独立的 main 发布 Worktree，不切换用户工作目录，不混入其它未提交修改。先读取远端头，在其上应用仅限本次操作的路径补丁，再正常 Commit 与 fast-forward Push。每个提交包含 `FacetLoom-Operation: <operation-id>` Trailer；成功后记录已发布头与操作 ID。一次操作重构提交时保留同一 ID。
+### 本地提交生效
+
+本文的“发布”统一指：校验通过的提交进入本地 `main`。需求、Gate、交付与精炼均以此为生效边界；有无 Git remote 使用相同规则，不增加项目模式或 WorkflowRun 发布目标字段。remote 只负责异步交换历史，连接失败不撤销本地结果，也不阻塞已满足本地条件的运行。
+
+```text
+本地事务 → 校验并提交本地 main → 业务操作生效
+                                  ↓ 可选、显式同步
+                           push / fetch + 合并
+```
+
+1. 在独立 detached 发布 Worktree 中，以本地 main 的预期头构造仅含本次操作的候选提交，不混入用户未提交修改，不创建发布分支。提交带 `FacetLoom-Operation: <operation-id>` Trailer；重构尚未生效的候选时保留操作 ID。
+2. 在仓库发布锁下重新读取 main、预期文件摘要及业务条件，确认候选仍可生效。头已变化时先查操作是否完成；未完成则重新校验并构造，不覆盖新提交。
+3. main 未在任何 Worktree 检出时，以预期旧 OID 做比较并更新引用；main 已检出时，仅在该 Worktree 的工作区、索引干净且无将被覆盖的未跟踪文件时，正常快进并同步文件。不能仅移动引用而留下旧索引或文件；不切换其它分支，不自动 stash、reset 或覆盖用户修改。条件不满足时保留待发布操作，等待用户处理。
+4. main 已包含候选后记录结果并推进状态。引用或工作目录更新中断时，先按实际 main、Git 索引与操作 Trailer 对账；不能确认完整落地则暂停新发布，修复前不覆盖未知用户修改。候选 Commit 仅存在本地对象库而未进入 main 时不算成功。
+
+上述锁串行化 FacetLoom 的本地写入；同时使用 Git 自身的引用和索引锁、预期头校验及正常文件更新保护，拒绝并发 Git 操作导致的未知变化。启动和发布不强制 fetch；全部有效性检查依据当前 clone 已知的 main。
 
 ### 发布分类与取消竞争
 
@@ -164,22 +182,22 @@ Git Manager 是唯一执行受信 Git 写入的组件；管理 main、隔离 Wor
 | publication_kind | 内容 | 校验 |
 | --- | --- | --- |
 | archive | 错误、取消、历史证据与已发生事实 | 可归档旧需求；不能接受成果、恢复执行或改正式代码 |
-| advance | 初始运行发布、正式审核请求、成果接受、恢复决定与执行解锁 | 必须仍为当前需求、当前有效 Run / Attempt / 错误；刷新 main 后若发现该 Run 已被 `replaces_run_id` 指向，则拒绝任何后续推进 |
+| advance | 初始运行发布、正式审核请求、成果接受、恢复决定与执行解锁 | 必须仍为本地 main 的当前需求、当前有效 Run / Attempt / 错误；重新读取 main 后若发现替代关系或正式输入已变，则拒绝旧 Run 继续推进 |
 | delivery | 正式代码交付或 no_change 成功回执 | 需求、基线、固定报告、确认及唯一交付全部有效 |
 
-既有报告/决定可作为历史证据归档，但不能因归档而变成有效批准。未完成报告仍须满足引用可读和摘要规则。生效发布先保存在本地 outbox，主状态不提前变成 accepted / satisfied，也不解锁后继；待发布视图与已生效状态分别展示。
+既有报告/决定可作为历史证据归档，但不能因归档而变成有效批准。未完成报告仍须满足引用可读和摘要规则。生效发布先保存在本地 outbox，进入本地 main 前不提前变成 accepted / satisfied，也不解锁后继；本地已生效之后可独立显示尚未同步，不继续占用业务 outbox 等待 push。
 
-取消或上游失效时，先在 Run 事务中封禁该执行身份、保存停止及撤销意图。尚未发送的旧 advance 操作标为 cancelled，必要事实纳入新的 archive 操作；不能把旧状态补丁原样重放。取消档案可跳过已撤销的旧操作，不被旧推进队列永久阻塞。已消耗自动恢复额度不返还。
+取消或上游失效时，先在 Run 事务中封禁该执行身份、保存停止及撤销意图。尚未提交本地 main 的旧 advance 操作标为 cancelled，必要事实纳入新的 archive 操作；不能把旧状态补丁原样重放。取消档案可跳过已撤销的旧操作，不被旧推进队列永久阻塞。已消耗自动恢复额度不返还。
 
 ```mermaid
 sequenceDiagram
     participant RT as Runtime
     participant GM as Git Manager
-    participant Main as 远端 main
+    participant Main as 本地 main
     RT->>RT: 保存取消/失效意图，禁止新执行和迟到结果生效
-    RT->>GM: 撤销未发送操作；查询在途推送
-    GM->>Main: 刷新头，按操作 Trailer 对账
-    alt 旧推进未推送成功
+    RT->>GM: 撤销未提交操作；查询在途 main 更新
+    GM->>Main: 读取头，按操作 Trailer 对账
+    alt 旧推进尚未进入 main
         GM-->>RT: 放弃旧推进
         RT->>RT: 活动 Attempt cancelled
     else 旧推进已经成功
@@ -193,26 +211,46 @@ sequenceDiagram
 
 涉及在途终态发布的 Attempt 先记录本地停止意图，待对账后确定历史终态；界面显示“已请求停止，发布结果待对账”。已经发布的 accepted / rejected 等终态不回写为 cancelled；已取消 Run 即使对账到先前成功的批准，也不能启动后继。Run cancelled 表示调度已停止，不承诺所有外部进程均已退出。
 
-生效推送后远端状态又变化时，在最新头追加当前取消事实，不强推撤销历史。需求取代前成功的正式交付照实记回执；推送被新版本提交拒绝则禁止重试旧交付。交付结果未知时仍遵循 Execution 的 publishing 对账规则。
+本地提交生效后又发现取消或需求取代时，在当前 main 追加事实，不改写已生效历史。取代关系被本 clone 获知前已成功的交付照实保留回执，但不代表成果仍适用于当前需求；尚未生效的旧交付不得重试为有效成果。交付结果未知时仍遵循 Execution 的 publishing 对账规则。
 
 ### main 并发写入
 
 ```text
-A 与 B 基于同一个 main 头
+A、B 是同一 clone 内的两个操作，基于同一个 main 头
     ↓
-A 推送成功；B 推送被拒
+A 更新 main 成功；B 的预期头校验失败
     ↓
-B 获取最新头，检查自己的预期输入
+B 重新读取本地 main，检查自己的预期输入与操作 ID
     ↓
-无冲突 → 在最新头重新构造提交并推送
+无冲突 → 在最新头重新构造尚未生效的提交
 状态或内容已变 → 阻塞原操作，重新审核
 ```
 
 - 不同 Run 的目录可以自动重新追加；不得用整个旧 Tree 覆盖 main。
-- 同一 Run 先串行化本地写入，远端以预期文件摘要和操作 ID 去重。交付还按 run_id 去重，不同操作 ID 也不能重复交付同一运行。Gate 按 gate_id 校验前一决策；其他 Gate 的更新可在复核固定材料后合并，冲突不采用最后写入者覆盖。
+- 同一 Run 先串行化本地写入，按预期文件摘要和操作 ID 去重。交付还按 run_id 去重，不同操作 ID 也不能重复交付同一运行。Gate 按 gate_id 校验前一决策；其他 Gate 的更新可在复核固定材料后合并，冲突不采用最后写入者覆盖。
 - 已发布后重试先核对操作是否存在，避免重复决策、交付或复活已清理档案。
 - main 新增或清理 `.facetloom/runs/` 不改变正式输入；其余路径变化按 Execution 的基线规则处理。
-- 同步不可用时保存本地待发布操作，需在线确认的 Gate 与交付等待；不强推，不自动改写历史。
+- 本地提交暂不可用时保留待发布操作；远端同步暂不可用只标记同步未完成，不阻止本地提交、Gate 或交付。
+
+### Git 异步同步
+
+不区分本地与远程项目。未配置 remote 时无需同步；配置后由用户显式执行 Git 同步，FacetLoom 不新增自动同步服务。各 clone 可以暂时持有不同的需求版本和成果，只能根据已知历史判断有效性。
+
+| 情况 | 处理 |
+| --- | --- |
+| push 成功 | 其它协作者可获取这些提交；不重新执行其中的操作 |
+| 网络失败、push 被拒或确认丢失 | 保留本地已生效结果；核对远端包含关系，必要时先获取更新，不重复交付或生成替代业务提交 |
+| 接收更新可快进 | 校验收到的定义和档案，再按本地 main 工作目录保护规则快进 |
+| 历史分叉 | 在隔离 detached Worktree 构造保留双方提交的 merge 候选，验证后再更新 main；不自动 rebase、强推或改写固定 OID |
+| 文本冲突或业务约束冲突 | 阻塞该合并，人工解决后重验；Git 能自动合并不代表业务规则有效 |
+
+合并验证覆盖定义、DAG、不可变记录及引用摘要、Run 拥有者、当前需求和替代关系；接收缺少 Artifact 字节的记录是允许的，不要求导入全部证据。历史操作按其原提交上下文验证，不能因当前需求已变而丢弃过去已生效的决定或交付；它们也不因此成为当前可复用的批准。
+
+不同 Run 的独立档案可共存；同一对象不兼容的更新、同名不同内容的需求版本、并发竞争的替代 Run，即使文本不冲突也不得静默选取。人工在保留双方历史的前提下协调需求、取消竞争运行等，再形成有效合并；不修改历史 Attempt 的冻结字段或伪造另一 Runtime 的状态。
+
+接收更新并进入本地 main 后，Runtime 在恢复调度、处理审核结果或交付前重新检查 current、替代关系与正式输入。自己的旧版或被替代未终态 Run 按已有协议停止、取消；正式输入发生变化则阻止旧 Run 继续推进或交付，要求新 Run。其它 clone 的 Run 不由本 Runtime 接管，已有决策和交付保留为历史事实。合并后代码不自动继承原候选的检查结论，需要验证合并结果时创建新 Run。
+
+fetch 本身只获取对象，未接纳到本地 main 的远端内容不成为执行输入。通过普通 Git 在服务外更新 main 时，Runtime 同样先检测头变化并校验；发现冲突、无效定义或记录时暂停相关推进，直到人工修复。同步不撤销其它 clone 已经发生的事实，也不提供全局即时取消或唯一性锁。
 
 ### 本地代码与持久证据
 
@@ -220,7 +258,7 @@ B 获取最新头，检查自己的预期输入
 
 正式成果交付时，保留最新 main 档案，在其上应用已接受代码变更并校验 project_tree；候选及最终检查报告先持久化，再获取绑定候选的人类确认。运行完成和交付分别记录：applied 在集成后追加回执；no_change 不创建空代码 Commit，直接发布回执。
 
-本地 `.runtime/runs/<run-id>/delivery.yaml` 保存活动交付意图和确认。调度、取消及交付共用 Run 锁；准备 main 提交时再获取仓库发布锁。远端推送仍依赖 fast-forward 校验，推送失败必须刷新并重验。publishing 结果未知时先查 Trailer，不创建第二个 delivery_id。协议与字段见 Execution。
+本地 `.runtime/runs/<run-id>/delivery.yaml` 保存活动交付意图和确认。调度、取消及交付共用 Run 锁；准备 main 提交时再获取仓库发布锁。本地预期头变化必须重验；publishing 表示正在提交本地 main，结果未知时先查 Trailer，不创建第二个 delivery_id。后续 push 不参与交付状态。协议与字段见 Execution。
 
 ## 本地 Artifact Store
 
@@ -231,7 +269,7 @@ B 获取最新头，检查自己的预期输入
 | 保存 / 读取 | 校验字节摘要，原子登记文件及直接依赖；解析内容 URI 为当前 clone 的受控文件 |
 | 检查可用性 | 区分本地可用、尚未导入、已在本地清理及缺失/损坏；缺内容不改运行事实 |
 | 导出 / 导入 | 按固定 Git 记录收集闭合依赖，校验独立交换包，整包提交；不操作正式代码或活动 Run |
-| 预览 / purge | 检查全部本地使用者及当前同步可见 main 的保留引用，人工确认后记录回执并删除 |
+| 预览 / purge | 检查全部本地使用者及本地 main 的保留引用，人工确认后记录回执并删除；无需联网 |
 
 协议和文件结构统一见 [Execution](04-execution.md#artifact-存储与交换)。存储写入、引用登记与保护标记使用同一 clone 级库锁；本地运行、待发布操作、精炼和交换操作在使用前登记保护，结束后释放。登记与有效状态通过文件事务一起提交，恢复时先重放并重建保护集合，再允许 purge。
 

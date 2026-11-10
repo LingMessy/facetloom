@@ -15,7 +15,7 @@
 | 改进 Commit | 已落实改动、验证结论、证据来源及清理范围 | main 的 Git 历史 |
 | 执行边界 | 固定 runner、文件与网络隔离、资源和凭据限制 | Git 定义及 Run 快照；本地 Runtime 实施隔离 |
 
-普通定义修改由人类审阅 Diff 后提交 main；Requirement 内容变化须发布新版本并更新 current.yaml。Refinement 是根据运行记录主动改进的入口。所有 main 写入都遵守 Git 凭据与分支保护。
+普通定义修改由人类审阅 Diff 后提交本地 main 即生效；Requirement 内容变化须发布新版本并更新 current.yaml。Refinement 是根据运行记录主动改进的入口。main 写入由受信 Git Manager 管理，远端同步遵守相应凭据与分支保护；是否推送不改变本地生效边界。
 
 ## Gate 模式与职责
 
@@ -213,7 +213,8 @@ flowchart TD
 | 成果 Gate Rejected | rejected Attempt → ErrorRecord → 错误 Gate |
 | 成果评估器异常或无法判断 | 原成果项人工接管或对原材料重评 |
 | 错误评估器异常、无法形成请求或无法提出有效动作 | 保留故障报告，blocked，交给人类；不递归错误处置 |
-| Git 发布或发布方本地 Artifact 持久化暂不可用 | 本地保留待发布操作，不假装正式审核已开始 |
+| 本地 main 提交或本地 Artifact 持久化暂不可用 | 保留待发布操作，不假装正式审核已开始 |
+| Git 远端同步暂不可用 | 不改变本地已生效决定，不阻塞满足本地条件的审核、恢复或交付 |
 | 完成后最终汇聚或交付失败 | IntegrationReport blocked / failed；修改成果须新 Run |
 
 ### ErrorRecord
@@ -391,10 +392,10 @@ approved_diff_digest: null
 
 ### 应用与提交
 
-1. 刷新 main，确认来源和目标文件仍匹配会话基线；变化则重新筛选或生成 Diff，并重新确认。
+1. 重新读取本地 main，确认来源和目标文件仍匹配会话基线；变化则重新筛选或生成 Diff，并重新确认，不强制获取远端更新。
 2. 在隔离 Worktree 应用采纳项。验证定义 Schema、引用和 DAG；代码改动运行相关测试；有 integration.checks 时执行最终检查。仅丢弃记录也要校验引用完整性。
-3. 一个 main Commit 同时包含改进、必要引用更新和已处理记录的清理。Git Manager 校验确认的 Diff 摘要，推送成功才将会话设为 completed。
-4. 推送被拒时刷新并复核；只有无关运行目录变化可自动重新构造提交。所选来源、引用依赖或目标变化时重新审核和验证。
+3. 一个 main Commit 同时包含改进、必要引用更新和已处理记录的清理。Git Manager 校验确认的 Diff 摘要，提交进入本地 main 后将会话设为 completed；后续推送不参与精炼状态。
+4. 本地预期头变化时重新读取并复核；只有无关运行目录变化可自动重新构造尚未生效的提交。所选来源、引用依赖或目标变化时重新审核和验证。已生效提交不为解决 push 失败而重新执行或改写。
 
 Commit 描述包含：`FacetLoom-Refinement: <id>`、人类确认主体、问题与改进、验证结论、清理或丢弃理由，以及删除前的 `<commit>:<path>`。应用后崩溃时按 Trailer 查找并校验已提交内容，恢复会话，避免重复应用。
 
