@@ -204,8 +204,8 @@ evidence_imports:
     media_type: application/json
     artifact_ref:
       type: artifact
-      uri: artifacts://evidence/<immutable-key>
-      digest: sha256:<file-digest>
+      uri: artifacts://sha256/<file-digest-hex>
+      digest: sha256:<file-digest-hex>
 ```
 
 `status` 为 `committed` / `rejected` / `not_imported`；仅 `committed` 项有 `artifact_ref`。只有整批导入清单提交成功后才能将项目标为 committed。批次失败时记录错误路径及原因，其余未导入项目不产生 Artifact 引用。
@@ -213,7 +213,7 @@ evidence_imports:
 ```json
 {
   "evidence_refs": [
-    {"type": "artifact", "uri": "artifacts://provided/<key>", "digest": "sha256:<digest>"}
+    {"type": "artifact", "uri": "artifacts://sha256/<hex>", "digest": "sha256:<hex>"}
   ],
   "evidence_files": ["pre-assess/input-check.json", "screenshots/login.png"]
 }
@@ -263,8 +263,8 @@ combination_id: <combination-id>
 attempt_id: <attempt-id>
 invocation_ref:
   type: artifact
-  uri: artifacts://invocations/<immutable-key>
-  digest: sha256:<digest>
+  uri: artifacts://sha256/<invocation-digest-hex>
+  digest: sha256:<invocation-digest-hex>
 readiness: ready
 applicability: applicable
 summary: 输入足以完成本节点任务。
@@ -354,8 +354,8 @@ check_report_ref: reports/<check-report-id>.yaml
 execution_result_ref: null
 invocation_ref:
   type: artifact
-  uri: artifacts://invocations/<immutable-key>
-  digest: sha256:<digest>
+  uri: artifacts://sha256/<invocation-digest-hex>
+  digest: sha256:<invocation-digest-hex>
 status: complete
 summary: 检查报告覆盖最终 Tree，变更符合任务范围。
 findings: []
@@ -420,12 +420,12 @@ Context Snapshot 是有效输入清单；Adapter 实际交给外部 Agent 的初
 ```yaml
 agent_input_ref:
   type: artifact
-  uri: artifacts://inputs/<immutable-key>
-  digest: sha256:<input-file-bytes-digest>
+  uri: artifacts://sha256/<input-file-bytes-digest-hex>
+  digest: sha256:<input-file-bytes-digest-hex>
   media_type: application/json
 ```
 
-Adapter 先组装并本地原子保存外部调用输入，再传入同一内容，不能事后根据定义重新生成来代替原请求。引用在请求形成时分配不可变 URI 与摘要，本地待上传状态单独记录；上传使用同一内容和引用，不改写 Attempt 输入。传输结果未知时按本地调用记录对账，不能声称请求一定送达或自动重复发送。
+Adapter 先将实际输入原子保存到本地 Artifact 库并计算摘要，再传入同一内容，不能事后根据定义重新生成来代替原请求。引用在请求形成时固定，后续导出或导入不改变它，也不改写 Attempt 输入。调用是否送达未知时按本地调用记录对账，不能声称请求一定送达或自动重复发送。
 
 留存内容只覆盖 FacetLoom 交给外部 Agent 的输入；它不等于 Agent 发给模型服务的完整请求。凭据由运行环境或连接层注入，不进入留存内容。不记录无法观测的原生系统提示、模型内部状态或内部压缩结果；Agent 未报告的模型及工具版本记 null，不宣称已固定。Gate 请求不包含自身 request_input_ref，避免自引用。
 
@@ -465,7 +465,7 @@ Adapter 先组装并本地原子保存外部调用输入，再传入同一内容
 
 状态、时间及 gate_report_refs / gate_decision_refs 可继续推进，但不进入审核输入摘要。各 Gate 的报告、建议和决策理由是审核输出，不写回 output_refs，也不自动成为其他 Gate 的输入。评估请求、GateReport 和 GateDecision 都携带 review_input_digest；Runtime 重新计算并校验，不能仅相信记录中的摘要。
 
-缺少执行证据时成果 Gate 返回 Blocked / Escalated；Runtime 确认缺失后将旧 Attempt 置为 failed，通过 ErrorRecord 交由错误 Gate 决定是否新建 Attempt。成果拒绝同样转错误处置；全部成果 Gate 必须重新审核，不新增审核轮次或仅审核的 Attempt 类型。评估器故障可由人类请求对原固定材料重评；人类仅解释已有材料时，将理由记录在 Decision 中。
+缺少执行证据时成果 Gate 返回 Blocked / Escalated。仅当前 clone 缺少已固定引用的内容时，先导入原内容，不修改审核材料、不使 Attempt 失败，也不新建 Attempt；需要这些材料的审核暂停。Runtime 确认必需证据从未形成、已不可恢复或必须新增材料时，将旧 Attempt 置为 failed，通过 ErrorRecord 交由错误 Gate 决定是否新建 Attempt。成果拒绝同样转错误处置；新 Attempt 的全部成果 Gate 必须重新审核，不新增审核轮次或仅审核的 Attempt 类型。评估器故障可由人类请求对原固定材料重评；人类仅解释已有材料时，将理由记录在 Decision 中。
 
 ## Checkpoint 与代码保留
 
@@ -492,7 +492,97 @@ Git Manager 为有代码变化的 Attempt 创建一个输出 Commit，以 input_
 
 本地使用 `.runtime/worktrees/` 下的 detached Worktree 锚定仍需恢复的输入与输出 Commit；中间对象在有后继锚定或 bundle 验证通过前不移除 Worktree。无需 Run、Input 或 Checkpoint 命名分支。
 
-跨 clone 或长期引用的代码输出，必须先导出自包含 Git bundle，覆盖复核所需的输入、输出、父提交与 Tree，再保存到持久 Artifact 位置。用空临时仓库验证 bundle 可导入且包含所需对象，校验摘要后才发布引用。日志中的裸 OID 不作为持久化保证。没有代码变化也需保证 input_commit 来自 main 可达历史或已有有效 bundle。
+跨 clone 或长期引用、且未由 main 历史保留的代码输出，必须先导出自包含 Git bundle，覆盖复核所需的输入、输出、父提交与 Tree，再保存到本地 Artifact 库。用空临时仓库验证 bundle 可导入且包含所需对象，校验摘要后才发布引用。跨 clone 传递时将该文件收入 Artifact 交换包；接收方校验后才能从中恢复对象。日志中的裸 OID 不作为持久化保证。没有代码变化也需保证 input_commit 来自 main 可达历史或已有有效 bundle。
+
+## Artifact 存储与交换
+
+Artifact Store 是每个 clone 自有的持久文件库。单 clone 执行不依赖 S3、Git LFS 或共享存储；Git 共享档案与引用，Artifact 内容按需用独立文件传递。S3 等后端留作后续扩展。
+
+日常证据主要在产生它的 clone 内使用。导出 Artifact 交换包是可选协作操作，不是运行完成或档案发布的前置条件；代码恢复所需 Git bundle 的本地生成与保留要求仍按上节执行。
+
+### 对象与目录
+
+| 对象 | 定义 | 保存位置 |
+| --- | --- | --- |
+| ArtifactRef | 文件原始字节的 SHA-256 身份，不包含存储位置或凭据 | 运行记录及其它类型化证据 |
+| 本地 Artifact 库 | 按摘要保存的不可变文件及依赖元数据 | 当前 clone 的 `.facetloom/.runtime/artifacts/` |
+| Artifact 交换包 | 清单与完整依赖文件的独立归档，供协作者手动传递 | 用户指定的 Git 外路径 |
+| Git bundle | 自包含的代码恢复文件，也是普通 Artifact | 本地库；需要分享时收入交换包 |
+| 本地清理回执 | 一次人工 purge 的范围、原因、进度与结果 | 本地库，不进入 main |
+
+```text
+.facetloom/.runtime/artifacts/       # 持久数据，不作为临时缓存清空
+├── objects/sha256/<hex>            # 原始文件；同 clone 内按摘要去重
+├── entries/<hex>.yaml              # 大小、类型及直接 dependency_refs
+├── staging/<operation-id>/         # 尚未提交的导入或导出材料
+├── imports/<operation-id>.yaml     # 整包导入回执
+└── purges/<operation-id>.yaml      # 本地清理回执 / tombstone
+```
+
+各项目 clone 使用独立目录，不跨项目共享对象。内容身份只由字节确定，媒体类型描述用途，不参与摘要。ArtifactRef 沿用 `{type, uri, digest, media_type}`；URI 固定为 `artifacts://sha256/<64位小写hex>`，digest 为相同值的 `sha256:<hex>`。URI 不是网络下载地址，也不说明其它 clone 是否持有内容。
+
+写入先暂存、计算摘要、fsync，再原子发布文件与有效 entry；entry 的提交复用本地文件事务。已有对象重新校验后复用，不能覆盖摘要不符的文件。Runtime 在保存结构化输入、调用清单等内容时，同时登记其中的直接类型化依赖；普通日志、图片等无依赖。导入失败留下的文件不生成有效 entry，不可通过目录扫描冒充已提交内容。完整日志的持久引用须先进入此库，临时日志路径不能作为 ArtifactRef。
+
+### 可用性与使用边界
+
+| 当前 clone 的情况 | 展示与处理 |
+| --- | --- |
+| 有有效 entry，文件及摘要匹配 | 本地可用 |
+| 无内容且没有清理回执 | 尚未导入；列出缺失摘要 |
+| 内容已由本地 purge 删除 | 已在本地清理；展示原因，可重新导入相同内容 |
+| 已登记但文件丢失或摘要不符 | 缺失或损坏；阻止使用，不视为检查失败 |
+
+可用性按当前文件检查，不写回不可变引用或审核摘要；重新导入成功后优先显示本地可用，旧清理回执仍保留。发布方发布档案前验证所需内容已在自己的库中持久可读，不要求其它 clone 已持有。同步 Git 只获得记录；从 Git 回退记录也不会恢复已删除的 Artifact。
+
+查看摘要无需所有文件。审核、执行、代码恢复或导出需要的材料缺失时，列出缺项并暂停该操作，不能跳过检查或视为通过。导入既有引用的原内容不属于追加执行证据，不改变冻结字段。界面只读查看仍可继续；恢复内容后由用户重试原操作，不自动推进活动 Run。
+
+### 显式导出与导入
+
+```text
+clone A：固定 Git 记录 → 收集依赖 → 校验 → 导出 Artifact 交换包
+                                             ↓ 通过现有渠道传递
+clone B：同步 Git 记录 → 校验交换包 → 导入本地库 → 按需复核
+```
+
+交换包采用未压缩 tar，示意文件名为 `run-evidence.facetloom-artifacts.tar`；包内只有 `manifest.yaml` 和 `objects/sha256/<hex>` 普通文件。manifest 的最小结构如下，尖括号表示示意值：
+
+```yaml
+schema_version: 1
+kind: artifact_exchange
+source_records:                       # 导出所选记录，固定到已有 Git Commit
+  - commit: <full-commit-oid>
+    path: .facetloom/runs/<run-id>/attempts/<attempt-id>.yaml
+    digest: sha256:<record-file-digest>
+artifacts:
+  - digest: sha256:<hex>
+    byte_length: 821
+    media_type: application/json
+    dependency_refs: []                # 与 entry 相同的直接类型化依赖
+```
+
+1. **导出**：用户选择已发布 Run 或其中的记录，固定所在 Commit、路径和摘要。沿 run_record、git_file、git_object 的恢复来源及 Artifact 的 dependency_refs 收集完整传递依赖；已访问对象去重，拒绝非法循环。结构化对象的依赖须与其已识别 Schema 中的类型化引用一致，不靠任意文本匹配推断。任何必要记录或 Artifact 缺失时列出缺项，整包导出失败，不生成看似完整的包。
+2. **形成文件**：仅写所需 Artifact 字节，不打包整个 `.runtime/`、活动状态或凭据。文件写入临时路径，全部验证并持久化后原子改名到用户指定路径。固定 Git 记录仍经正常 Git 同步；交换包清单不代替这些记录。
+3. **校验**：接收方先同步并核对 source_records；所需 Commit 或记录缺失时要求先同步。核对传递依赖与包内清单、大小和逐文件摘要，拒绝缺项、多余文件、重复条目、重复摘要，以及非普通文件、链接、绝对或越界路径。只流式读取规定的成员，不将 tar 任意解压到目标目录。清单大小、文件数和总字节数受本地资源上限限制，导入前展示总量；不套用单次 Agent 证据的 10 MiB / 100 MiB 限额，以允许较大的 Git bundle。
+4. **导入**：全部内容校验通过后，在本地事务中一次提交新 entry 与整包回执；重复内容重新校验后复用。中断前未提交的内容不可用，已提交事务重放完成；任何失败都不发布有效的部分导入结果，既有对象不受影响。
+
+清单及内容都作为不可信输入读取；摘要证明内容匹配，不代表其成果已经批准。导入不执行脚本、不更新 main、不接管 Worker，也不创建或恢复运行。代码恢复由后续显式操作完成，并按 Git bundle 规则重新验证。
+
+### 保留与人工 purge
+
+默认长期保留，不自动按 TTL 删除，也不因导出成功删除源内容。Refinement 仅整理 Git 记录，与物理清理独立。
+
+| 引用或使用情况 | 本地删除规则 |
+| --- | --- |
+| 活动运行、待审核、待交付、待发布、仍用于恢复 | 保护其完整依赖，不允许 purge |
+| main 当前保留的其它有效记录仍依赖 | 保留，包括经 git_file 固定到历史文件的依赖 |
+| 本地精炼会话、未完成事务或导入/导出正在使用 | 暂时保护；完成或显式结束后重新评估 |
+| 仅 Git 历史记录依赖，或已确认无引用 | 人工预览、确认后可 purge；历史内容将无法在本地取回 |
+
+purge 先刷新 main，扫描当前保留记录与全部本地使用者的传递依赖，生成包含对象、字节数、历史影响和阻止原因的预览。无法完成引用检查时不允许删除；预览后有新引用或状态变化须重新计算并确认，不依靠“Run 已完成”判断。
+
+确认后先持久化本地回执，记录 operation_id、对象摘要、操作者、原因、确认范围摘要及进度，再逐项删除文件和有效 entry 并验证。新引用、导入/导出和删除使用同一库锁协调；锁内重新检查保护范围。中断后按回执重放，已不存在的目标按已删除处理；删除失败保留待完成状态，不虚报成功。并发锁及重放职责见 [Services](05-services.md)。
+
+回执只说明当前 clone 的副本已被清理，不表示全局销毁。它不进入 Git，不改写 ArtifactRef、Attempt 或历史决策。重新导入相同字节恢复本地可用性；导出包、其它 clone 和备份由各持有者管理。普通运行目录或 Worktree 回收必须保留 Artifact 库；项目备份与迁移需显式包含它。
 
 ## 证据引用
 
@@ -509,18 +599,18 @@ output_refs:
       oid: <full-commit-oid>
       recovery_bundle_ref:
         type: artifact
-        uri: artifacts://<immutable-bundle-key>
-        digest: sha256:<bundle-digest>
+        uri: artifacts://sha256/<bundle-digest-hex>
+        digest: sha256:<bundle-digest-hex>
         media_type: application/x-git-bundle
   - role: evidence
     ref:
       type: artifact
-      uri: artifacts://<immutable-test-report-key>
-      digest: sha256:<digest>
+      uri: artifacts://sha256/<digest-hex>
+      digest: sha256:<digest-hex>
       media_type: application/json
 ```
 
-已经由 main 可达历史保留的代码 Commit 可以省略 recovery_bundle_ref。持久引用不得依赖仅在某个 clone 存在的路径。Artifact Store 的具体实现不限定，但发布前必须验证内容可读、摘要匹配且位置持久；普通临时文件路径不满足要求。
+已经由 main 可达历史保留的代码 Commit 可以省略 recovery_bundle_ref。Artifact 引用使用内容身份，不使用发布方本地路径；发布前验证发布方本地库中的内容可读且摘要匹配。其它 clone 通过交换包获取内容，Git 中的引用本身不保证当地可用；普通临时文件路径不满足持久化要求。
 
 仓库文件引用固定到 Commit，Refinement 清理后仍可解析：
 

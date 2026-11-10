@@ -19,7 +19,10 @@ flowchart LR
     AD --> EA[容器内外部 Agent CLI]
     PM --> CK[独立检查命令]
     GM --> Main[(main)]
-    GM --> Artifact[(持久 Artifact)]
+    GM --> AS[本地 Artifact Store]
+    UI --> AS
+    AS --> Artifact[(当前 clone 的持久内容库)]
+    AS --> Exchange[独立 Artifact 交换包]
     RT --> Local[(本地持久状态)]
     RF --> Local
 ```
@@ -44,13 +47,14 @@ flowchart LR
 ├── workers/<attempt-id>.yaml  # Worker 身份、停止意图及调用引用
 ├── invocations/<invocation-id>.yaml # 外部调用、原生会话与输入记录
 ├── gate-tasks/<report-id>.yaml # 评估任务、取消、接管与恢复标记
+├── artifacts/                # 按摘要保存的持久内容、导入与清理回执
 ├── logs/                     # 完整日志与对话
 ├── refinements/<id>/          # 会话、候选 Diff、验证结果
 ├── locks/
 └── runtime.sqlite            # 可选索引或缓存
 ```
 
-本地文件是未发布运行的恢复依据，SQLite 不是必需依赖。丢失本地状态后只能从 Git 恢复已发布证据，不能声称可重建未发布操作或继续原 Worker。
+本地文件是未发布运行的恢复依据，SQLite 不是必需依赖。丢失本地状态后，Git 只恢复已发布档案，Artifact 字节须从保留库或交换包恢复；不能声称可重建未发布操作或继续原 Worker。回收 Worktree、Worker 或临时日志时不清空 Artifact 库，备份和迁移须将其作为持久数据。
 
 ## 本地文件事务
 
@@ -113,7 +117,7 @@ side_effects:
 ```
 
 - 同一 aggregate 的后续事务只能在前一事务 APPLIED 后创建，故恢复时不存在合法的越序覆盖。恢复完毕前不启动新 Worker。
-- 启动 Worker、评估请求、上传及推送都先持久化意图。容器按稳定 worker ID 查询；调用按 report ID / 请求摘要对账；Artifact 按内容摘要校验；Git 按操作 Trailer 与目标内容校验。
+- 启动 Worker、评估请求、Artifact 导入/导出/清理及 Git 推送都先持久化意图。容器按稳定 worker ID 查询；调用按 report ID / 请求摘要对账；Artifact 按内容摘要及本地操作回执校验；Git 按操作 Trailer 与目标内容校验。
 - 推送确认丢失时先刷新 main、在历史中查找操作 ID。即使 Refinement 已清理当前档案，也不能重新追加已执行操作或复活旧记录。
 - 外部动作状态为 pending / running / succeeded / failed / unknown / cancelled，确认失败记录原因并等待重试或人工处理；状态变化也通过文件事务保存。恢复动作的扣减、状态和 outbox 同事务提交，重放不重复扣减；取消后不返还已安排额度。
 - 错误恢复 Worker 依赖相应决定成功发布；同一 Run 的发布队列按 sequence 串行推进；成果接受及交付也等待对应 main 提交确认。普通 Worker 的启动不要求每个内部状态都提交 Git。
@@ -142,8 +146,8 @@ Git Manager 是唯一执行受信 Git 写入的组件；管理 main、隔离 Wor
 | 保存 Checkpoint | Attempt、输入、分组写入 Scope、outcome 与 Tree 一致性、取消或失效状态 |
 | 保存 CheckReport | Snapshot 检查清单、真实执行记录、修复次数与最终 Tree，禁止 Worker 自报通过替代结果 |
 | 导入 Agent 证据 | 引用属于调用输入白名单；路径、文件类型、数量、单项/合计大小、摘要与 Artifact 持久性全部通过后才发布规范化结果 |
-| 发布档案 | owner_runtime_id、预期记录摘要、ID、引用和持久证据 |
-| 发布成果 waiting_gate | 最终 Tree 的全部检查有结果、agent_input_ref 与执行证据持久可读、固定字段与 review_input_digest 一致 |
+| 发布档案 | owner_runtime_id、预期记录摘要、ID、引用和发布方本地持久证据 |
+| 发布成果 waiting_gate | 最终 Tree 的全部检查有结果、agent_input_ref 与执行证据在发布方本地持久可读、固定字段与 review_input_digest 一致 |
 | 发布错误 waiting_gate | failed / rejected Attempt、ErrorRecord 与可用证据已保存，错误策略有效；不要求成果字段 |
 | 保存成果 Gate | review_kind=result、固定材料摘要、策略、主体、报告/接管依据、Attempt 摘要、前一决策和 evaluated_tree |
 | 保存错误 Gate | review_kind=error、active_error_ref、错误策略及摘要、CombinationRun 摘要、前一决定、Run 计数、修复范围与动作 ID |
@@ -212,11 +216,28 @@ B 获取最新头，检查自己的预期输入
 
 ### 本地代码与持久证据
 
-根输入来自 source_commit，汇聚输入来自最终约简 DAG 快照的直接前驱当前有效输出，按 Execution 的稳定逐步三方合并协议构造。活动 Worktree 锚定需要的本地 Commit；关闭前保证有后继 Worktree 或已验证的持久 bundle。记录发布前上传所需 Artifact，验证 bundle 在空仓库中可恢复输入与输出。不用额外命名分支维持快照。
+根输入来自 source_commit，汇聚输入来自最终约简 DAG 快照的直接前驱当前有效输出，按 Execution 的稳定逐步三方合并协议构造。活动 Worktree 锚定需要的本地 Commit；关闭前保证有后继 Worktree 或已验证的持久 Git bundle。记录发布前将所需 Artifact 保存到发布方本地库，验证 Git bundle 在空仓库中可恢复输入与输出。不用额外命名分支维持快照，也不要求上传到共享服务。
 
 正式成果交付时，保留最新 main 档案，在其上应用已接受代码变更并校验 project_tree；候选及最终检查报告先持久化，再获取绑定候选的人类确认。运行完成和交付分别记录：applied 在集成后追加回执；no_change 不创建空代码 Commit，直接发布回执。
 
 本地 `.runtime/runs/<run-id>/delivery.yaml` 保存活动交付意图和确认。调度、取消及交付共用 Run 锁；准备 main 提交时再获取仓库发布锁。远端推送仍依赖 fast-forward 校验，推送失败必须刷新并重验。publishing 结果未知时先查 Trailer，不创建第二个 delivery_id。协议与字段见 Execution。
+
+## 本地 Artifact Store
+
+这是 Runtime 内的存储职责，不是独立部署的服务。Git Manager 与 Adapter 通过它保存、解析和校验内容；Worker 只获得本次输入的只读材料和独立证据输出目录，不直接挂载整个库。
+
+| 操作 | 责任 |
+| --- | --- |
+| 保存 / 读取 | 校验字节摘要，原子登记文件及直接依赖；解析内容 URI 为当前 clone 的受控文件 |
+| 检查可用性 | 区分本地可用、尚未导入、已在本地清理及缺失/损坏；缺内容不改运行事实 |
+| 导出 / 导入 | 按固定 Git 记录收集闭合依赖，校验独立交换包，整包提交；不操作正式代码或活动 Run |
+| 预览 / purge | 检查全部本地使用者及当前同步可见 main 的保留引用，人工确认后记录回执并删除 |
+
+协议和文件结构统一见 [Execution](04-execution.md#artifact-存储与交换)。存储写入、引用登记与保护标记使用同一 clone 级库锁；本地运行、待发布操作、精炼和交换操作在使用前登记保护，结束后释放。登记与有效状态通过文件事务一起提交，恢复时先重放并重建保护集合，再允许 purge。
+
+需要多类锁时，顺序为 Run 或 Refinement 会话锁 → Artifact 库锁 → 仓库发布锁，不同时获取多个 Run 锁。purge 在库锁下读取已提交的引用/保护视图，不反向获取 Run 锁；发现变化或无法核对完整依赖则中止并重新预览。耗时打包与 Git 同步在锁外进行，使用期间持久保护所需对象。删除意图提交后，相关对象不可新增引用或开始导出，直到删除完成；再次导入须先完成或对账该清理操作。
+
+库自身的导入与清理事务使用 `aggregate: {kind: artifact_store, id: <runtime-id>}`，以库锁串行化；仍遵循 COMMITTED / APPLIED 协议。导入原子发布 entry 和回执，未提交字节不对外可用；purge 先记录清理意图，再幂等删除并逐项更新结果。清理失败保留待完成回执，恢复时优先对账，不报全局删除成功。该锁只约束当前 clone，不声称保护其它离线副本；未来 S3 或 LFS 后端不属于当前依赖。
 
 ## Refinement 协调
 

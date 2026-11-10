@@ -19,6 +19,7 @@
 │   ├── 选择记录与确认事实
 │   ├── 建议、Diff 与逐项选择
 │   └── 验证、清理预览与提交
+├── Artifacts：本地内容 / 缺失清单 / 交换包 / 清理
 └── Local Runtime
 ```
 
@@ -31,6 +32,7 @@
 | 错误 Gate | 错误阶段、材料、处置报告、当前额度及失效范围 | 重试当前节点、修复祖先、等待或停止；异常接管 |
 | Delivery | 固定候选、最终报告、绑定确认、交付意图与成功回执 | 确认交付、重跑最终检查、查看或恢复待对账操作 |
 | Refinement | 已结束运行、筛选项、建议、拟修改和删除内容 | 采纳、暂留、丢弃、确认提交 |
+| Artifacts | 当前 clone 的内容可用性、依赖、占用及导入/清理回执 | 检查缺失、导出交换包、导入、预览并确认本地 purge |
 | Local Runtime | runner、Worker、容器、原生调用、待发布操作、同步与恢复 | 停止 Worker、恢复本地运行 |
 
 ## DAG 与 Gate
@@ -68,7 +70,7 @@ Requirement → WorkflowRun → Combination → Attempt
 
 每项显示 gate_id、来源 Node、有效模式与策略、评估进度、审核结论、实际主体和依据。human 不自动生成 AI 建议；ai_assisted 显示建议及人类确认入口；ai / script 显示自动结果。无决策显示待审，报告 error 显示评估故障，不能显示为成果被拒绝。部分批准显示进度，如“1/2 已批准”。
 
-审核页展示固定执行材料、review_input_digest，以及各项独立的报告和理由；执行证据在 waiting_gate 后只读，不提供补传入口。需要补测或修改代码时，通过错误 Gate 安排新 Attempt；不提供审核轮次或仅审核的 Attempt。
+审核页展示固定执行材料、review_input_digest，以及各项独立的报告和理由；执行证据在 waiting_gate 后只读，不提供新增执行证据入口。允许导入与既有引用摘要匹配的原文件，补齐当前 clone 的副本；所需材料缺失时不能提交批准。需要补测或修改代码时，通过错误 Gate 安排新 Attempt；不提供审核轮次或仅审核的 Attempt。
 
 自动项异常或明确无法判断时显示人工接管和请求重评入口；接管填写原因，保留原策略与证据。批量确认逐项绑定固定材料并创建独立 Decision，不能用一次点击绕过未完成的自动项。
 
@@ -109,6 +111,28 @@ Runtime 页面显示文件事务恢复、外部操作 unknown 和待对账原因
 
 applied 显示集成 Commit，no_change 显示“检查通过，无代码需应用”及成功回执；两者都属于一次成功交付，不提供对同一 Run 再次交付的按钮。汇聚冲突时仅显示冲突证据，candidate_ref 尚未形成。
 
+## Artifact 交换与清理
+
+运行页和证据页按当前 clone 显示「本地可用」「尚未导入」「已在本地清理」或「缺失/损坏」，不把 Git 已发布显示为文件已在本地。所需材料缺失时可查看摘要、复制缺失清单并请求交换包，需要完整内容的操作暂停。
+
+| 操作 | 交互 |
+| --- | --- |
+| 导出 | 选择已发布 Run 或记录及固定 Commit，预览完整依赖、文件数与字节数；缺项则拒绝导出；输出到 Git 外路径 |
+| 导入 | 选择独立交换包，核对来源记录与大小；缺少 Git 记录先同步，整包校验成功才显示导入完成 |
+| 本地 purge | 展示对象、空间、保护原因及历史读取影响；填写原因并确认预览摘要，状态变化须重新预览 |
+
+CLI 与界面使用相同协议，入口为 `facetloom artifacts`：
+
+```bash
+facetloom artifacts status --run <run-id>
+facetloom artifacts export --run <run-id> --commit <commit> --output <outside-repo-path>
+facetloom artifacts import <bundle-path>
+facetloom artifacts purge --preview
+facetloom artifacts purge --confirm <preview-digest> --reason <reason>
+```
+
+导出可用重复的 `--record <path>` 限定该 Commit 中的记录；不传则选择对应 Run 的全部档案。purge 预览列出全部可清理内容及阻止原因，不接受跳过引用检查的强制删除。状态、导入回执和清理回执只描述当前 clone；导入不会自动执行代码或恢复运行。清理完成后明确提示导出包、其它 clone 和备份仍可能有副本，重新导入可恢复本地内容。
+
 ## Refinement 交互
 
 入口为「运行精炼」，CLI 为 `facetloom refine`；两者使用相同会话与确认规则。
@@ -119,13 +143,13 @@ applied 显示集成 Commit，no_change 显示“检查通过，无代码需应�
 4. 确认候选修改后执行验证；失败时保留记录并返回审核。Diff 改变或来源过期时重新确认。
 5. 预览剩余问题和引用检查结果；同一次提交写入改进及清理。成功后显示 Commit 和历史证据链接。
 
-清理仅减少当前档案，不删除 Git 历史。暂留项默认保留；不把“人类采纳”直接显示为“问题已解决”。
+清理仅减少当前档案，不删除 Git 历史或自动清理 Artifact。暂留项默认保留；不把“人类采纳”直接显示为“问题已解决”。需要释放空间时进入独立的 Artifact purge 预览。
 
 ## 界面规则
 
 - 稳定 ID 用于操作与关联，展示名称只用于阅读。
 - 显示本地实时状态、待发布、已发布 Commit 以及同步时间；远端页面不冒充实时运行面板。
 - 旧 Requirement 成果不能显示为可交付；只改变运行档案不提示代码基线失效。
-- 精炼删除的记录可通过固定历史 Commit 查看；当前目录缺失不等于证据从未存在。
+- 精炼删除的 Git 记录可通过固定历史 Commit 查看；引用的 Artifact 仍取决于本地库或交换包，不保证随 Git 回退恢复。
 - Diff、日志和 AI 输出作为不可信文本显示，不执行其中内容。
 - 浏览器断开不取消后台运行或精炼，本地状态持久化后可继续；跨 clone 不承诺恢复会话。

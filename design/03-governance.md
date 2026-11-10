@@ -99,6 +99,8 @@ Runtime / Git Manager → 校验主体与策略，保存决策，汇总并发布
 
 Runtime 在调用前分配 report_id，持久化本地任务与实际初始请求；发布报告前将请求保存为持久 Artifact 并校验引用，留存范围见 [Execution](04-execution.md)。请求固定上述身份、上下文、策略、输入/输出 Commit 和冻结的执行证据。审核者可读取 Requirement、任务上下文及自己的审核要求；运行档案只按显式证据引用提供，不作为项目定义输入。
 
+Artifact 的可读性按执行审核的 clone 检查。Git 已同步但本地未持有材料时，先导入匹配原引用的交换包；不把本地缺失当作成果被拒绝，也不能跳过材料直接批准。补齐原内容不改变冻结审核输入；新增执行证据仍须新 Attempt。
+
 脚本通过 stdin 接收 JSON 请求：`schema_version`、`review_kind: result`、`report_id`、`run_id`、`combination_id`、`attempt_id`、`gate_id`、`context_snapshot_ref`、`gate_policy_digest`、`review_input_digest`、`previous_decision_id`、`input_commit`、`output_commit`、`evaluated_tree`、`evidence_refs`，以及已解析的 `context_snapshot` 和完整 `review_input`。review_input 是 Execution 定义的五字段摘要对象，请求中重复出现的字段必须一致。请求中的 evidence_refs 只取固定 output_refs 的执行证据，包括最终 CheckReport，不包含其他 Gate 的报告。引用由 Runtime 提供只读材料供评估器访问。stdout 仅返回一个 JSON 对象，日志写 stderr：
 
 ```json
@@ -162,7 +164,9 @@ decided_by:
 created_at: "2026-11-09T12:00:00Z"
 ```
 
-`human` / `ai_assisted` 只接受 human 主体；`ai` / `script` 正常决策主体必须与模式及报告评估器一致。自动模式异常或明确无法判断时暂停该项，允许人类补充决策或请求原模式重评；人工接管需记录原因、原报告或升级决策引用，保留原策略。ai_assisted 建议生成失败时，人类可引用错误报告继续审核并记录原因。评估器故障不自动循环重试。缺少必要执行证据时返回 Blocked / Escalated；Runtime 按固定检查清单与引用校验确认缺失后将 Attempt 标记 failed，创建 ErrorRecord 交给错误 Gate。需要补测、重新执行或修改代码时，通过错误处置安排新 Attempt；人工接管不能追加材料绕过冻结规则。单纯解释已有材料写入 Decision 的 rationale。审核者额外要求新增测试时以 Rejected 说明理由，再由错误 Gate 安排新 Attempt，不能把额外要求当成已配置检查缺失。
+`human` / `ai_assisted` 只接受 human 主体；`ai` / `script` 正常决策主体必须与模式及报告评估器一致。自动模式异常或明确无法判断时暂停该项，允许人类补充决策或请求原模式重评；人工接管需记录原因、原报告或升级决策引用，保留原策略。ai_assisted 建议生成失败时，人类可引用错误报告继续审核并记录原因。评估器故障不自动循环重试。
+
+缺少必要执行证据时返回 Blocked / Escalated。仅本地副本缺失时先导入原内容；Runtime 确认证据从未形成、已不可恢复或需要新增时，才将 Attempt 标记 failed，创建 ErrorRecord 交给错误 Gate。需要补测、重新执行或修改代码时，通过错误处置安排新 Attempt；人工接管不能追加材料绕过冻结规则。单纯解释已有材料写入 Decision 的 rationale。审核者额外要求新增测试时以 Rejected 说明理由，再由错误 Gate 安排新 Attempt，不能把额外要求当成已配置检查缺失。
 
 ### 汇总、并发与发布
 
@@ -190,7 +194,7 @@ flowchart TD
     B -->|是| C[各 Node 成果 Gate]
     B -->|否| E[ErrorRecord]
     C -->|全部批准| OK[接受成果并解锁后继]
-    C -->|拒绝或确认材料缺失| E
+    C -->|拒绝或材料需补做 / 无法恢复| E
     E --> G[Workflow 错误 Gate]
     G --> R[重试当前节点]
     G --> U[修复祖先并失效后继]
@@ -209,7 +213,7 @@ flowchart TD
 | 成果 Gate Rejected | rejected Attempt → ErrorRecord → 错误 Gate |
 | 成果评估器异常或无法判断 | 原成果项人工接管或对原材料重评 |
 | 错误评估器异常、无法形成请求或无法提出有效动作 | 保留故障报告，blocked，交给人类；不递归错误处置 |
-| Git / Artifact 暂时不可用 | 本地保留待发布操作，不假装正式审核已开始 |
+| Git 发布或发布方本地 Artifact 持久化暂不可用 | 本地保留待发布操作，不假装正式审核已开始 |
 | 完成后最终汇聚或交付失败 | IntegrationReport blocked / failed；修改成果须新 Run |
 
 ### ErrorRecord
@@ -394,8 +398,8 @@ approved_diff_digest: null
 
 Commit 描述包含：`FacetLoom-Refinement: <id>`、人类确认主体、问题与改进、验证结论、清理或丢弃理由，以及删除前的 `<commit>:<path>`。应用后崩溃时按 Trailer 查找并校验已提交内容，恢复会话，避免重复应用。
 
-不生成永久的精炼审批目录。回退改进 Commit 会同时恢复该 Commit 删除的记录；Requirement 版本恢复旧语义时仍按新版本发布，不将 current 指针倒退。
+不生成永久的精炼审批目录。回退改进 Commit 会同时恢复该 Commit 删除的 Git 记录，但不会恢复另行 purge 的 Artifact；缺失内容须从仍持有的交换包或其它副本导入。Requirement 版本恢复旧语义时仍按新版本发布，不将 current 指针倒退。
 
 ### 保留目标
 
-精炼控制 main 当前目录和 Agent 上下文大小。Git 历史保留原记录，不执行历史重写，也不承诺减小历史仓库体积。完整对话和大日志在进入 Git 前就分离；外部 Artifact 的物理删除不属于此流程。
+精炼控制 main 当前目录和 Agent 上下文大小。Git 历史保留原记录，不执行历史重写，也不承诺减小历史仓库体积。完整对话和大日志在进入 Git 前就分离；外部 Artifact 的物理删除不属于此流程。需要释放本地空间时，另行执行 [Artifact 人工 purge](04-execution.md#保留与人工-purge)，检查当前保留记录、活动状态及完整依赖后确认；Git 历史保留引用不保证 Artifact 仍有副本可读取。

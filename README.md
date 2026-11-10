@@ -56,10 +56,12 @@ Refinement → 人类筛选记录 → Agent 建议 → 采纳并验证
 .facetloom/
 ├── requirements/ workflows/ facets/ references/ runners/ evaluators/  # main 上的正式定义
 ├── runs/<run-id>/                                 # main 上的精简档案
-└── .runtime/                                     # 本地状态，不进入 Git
+└── .runtime/                                     # 本地状态与持久 Artifact 库，不进入 Git
 ```
 
-每个协作者在自己的 clone 创建不同 Run。main 共享精简状态、结果、决策和证据引用；本地通过文件事务保存活动 Worker、待发布操作、完整对话和恢复信息。SQLite 可选。大型证据与实际外部调用输入存于 Git 外的持久 Artifact，档案记录 URI 与摘要；需长期复核的代码快照导出为持久 Git bundle。记录覆盖 FacetLoom 提供的输入与可观测事件，不承诺外部 Agent 的隐藏推理或内部模型请求。
+每个协作者在自己的 clone 创建不同 Run。main 共享精简状态、结果、决策和证据引用；本地通过文件事务保存活动 Worker、待发布操作和恢复信息，SQLite 可选。大型证据、实际调用输入和完整对话保存在本地 Artifact 库；Git 外的代码快照用自包含 Git bundle 保留。记录覆盖 FacetLoom 提供的输入与可观测事件，不承诺外部 Agent 的隐藏推理或内部模型请求。
+
+Git 同步档案，内容按需传递：导出所选记录依赖的独立 Artifact 交换包，协作者通过现有渠道传递并校验导入。引用采用内容哈希，不是下载地址；其它 clone 未导入时仍可看摘要，需要材料的审核或恢复则暂停。默认不依赖 S3、Git LFS 或中心存储服务。
 
 审核定义统一进入 Git。Workflow 与 Node 的必要检查累积，同一 Attempt 默认最多修复并重检 2 次；完成后冻结成果输入。执行失败或成果拒绝交给独立错误 Gate，决定重试、修复上游、等待或停止；默认人工，每个 Run 最多自动恢复 3 次。恢复获准不代表成果被接受，补测或修改冻结成果需要新 Attempt。
 
@@ -67,10 +69,13 @@ Refinement → 人类筛选记录 → Agent 建议 → 采纳并验证
 
 Refinement 的界面入口为「运行精炼」，CLI 为 `facetloom refine`。采纳项验证成功后才清理对应记录；暂留问题、活动运行、待 Gate 和待交付证据继续保留。原记录通过 Git 历史追溯，清理目标是当前目录与 Agent 上下文，不重写历史。
 
+Artifact 默认保留，释放空间须另行人工 purge，先检查完整依赖并确认影响。它只删除当前 clone 的内容并留下本地回执；不会删除协作者、交换包或备份中的副本。Git 回退可恢复记录，无法恢复另行删除的 Artifact。
+
 ## 当前验证范围
 
 - 两个包含分支与汇聚的 Facet，生成并校验 Combination DAG。
 - 单 clone Runtime 的并行、Checkpoint、本地恢复及不同 clone 的档案协作。
+- 本地 Artifact 持久化、独立交换包导出/导入、缺失材料提示与人工清理保护。
 - 四种 Gate 模式、Node 成果全部批准规则与 Workflow 错误处置；最终集成检查及人类交付确认；Worker 不持有 main 推送凭据。
 - 最小 WebUI / CLI：DAG、Diff、日志、审核、运行精炼。
 

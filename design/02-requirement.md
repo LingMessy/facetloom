@@ -433,7 +433,7 @@ worker_ref 属于本地状态，不写入 Git。新 Attempt 最多创建一个 W
 | Runtime 重启 | 先恢复已提交文件事务，再对账 Worker、评估任务和待发布操作，最后恢复调度 |
 | Worker 无法对账 | Attempt failed，创建 ErrorRecord，按错误 Gate 决定恢复 |
 | main 推送失败 | 本地保留待发布操作；对账后重试，不提前解锁或重复恢复 |
-| 本地状态丢失 | 从 main 恢复已发布证据；不保证恢复未发布操作或活动 Worker，通常新建 Run |
-| 另一 clone 查看 | 读取 main 档案，从 bundle 恢复代码，不接管活动 Worker |
+| 本地状态丢失 | 从 main 恢复已发布档案，Artifact 另从保留库或交换包恢复；不保证恢复未发布操作或活动 Worker，通常新建 Run |
+| 另一 clone 查看 | 读取 main 摘要；所需 Artifact 未持有时先导入交换包，再从其中的 Git bundle 恢复代码，不接管活动 Worker |
 
 本地文件是恢复依据，SQLite 仅为可选索引和缓存。多对象事务、外部动作对账与崩溃恢复顺序见 [Services](05-services.md)；档案清理见 [Governance](03-governance.md)。

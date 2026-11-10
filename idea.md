@@ -10,7 +10,7 @@
 
 Workflow 与 Facet 表达上下文和依赖，Combination 承担执行，Runtime 负责调度。每次 Run 固定一个 source_commit，Worker 在隔离 detached Worktree 中并行执行。
 
-正式定义、已接受代码和精简运行档案统一保存 main。本地状态恢复活动运行，Git 共享已发布证据。Refinement 通过人机交互筛选记录、提出改进，落实并验证后清理已处理记录。
+正式定义、已接受代码和精简运行档案统一保存 main。本地状态恢复活动运行，Git 共享已发布档案与证据引用，大型内容经独立 Artifact 交换包按需传递。Refinement 通过人机交互筛选记录、提出改进，落实并验证后清理已处理记录。
 
 具体文件、状态机、交付与精炼协议见 design；本文件解释产品动机和可能的扩展。
 
@@ -42,7 +42,7 @@ AI 的代码生成能力不断提高，但快速生成 Demo 并不等于长期�
 | **Combination Worker（组合执行器）** | Runtime 为一个 Attempt 管理的隔离容器、Worktree 与调用生命周期 | 调用外部 Agent 执行 Combination Node |
 | **Gate（决策关卡）** | 针对组合执行成果的需求对齐、验收或授权 | 作为组合执行的一部分 |
 
-**Artifact** 不是独立版本化的核心实体，而是组合执行过程中产生和传递的文件、规范、代码、报告等中间成果，正式代码和精简证据索引由 Git 管理，大型内容保存在 Git 外的持久位置。
+**Artifact** 不是独立版本化的核心实体，而是组合执行过程中产生和传递的文件、规范、代码、报告等中间成果，正式代码和精简证据索引由 Git 管理，大型内容保存在每个 clone 的本地持久内容库。
 
 ### 2.1 特别重要的边界
 
@@ -268,7 +268,7 @@ main：正式定义 + 已接受代码 + .facetloom/runs/<run-id>/
                         最终检查与交付 main
 ```
 
-每个 clone 的 Runtime 独立运行，各 Run ID 隔离档案路径。并行 Worker 用独立 Worktree，不创建命名执行分支。代码快照需要长期或跨 clone 复核时导出持久 Git bundle；YAML 中的 Commit ID 不保证对象被保留。
+每个 clone 的 Runtime 独立运行，各 Run ID 隔离档案路径。并行 Worker 用独立 Worktree，不创建命名执行分支。代码快照需要长期或跨 clone 复核时导出 Git bundle 保存到本地 Artifact 库；YAML 中的 Commit ID 不保证对象被保留。跨 clone 共享时导出包含完整依赖的独立 Artifact 交换包，通过现有渠道传递并校验导入；Git bundle 是包内的一种内容。默认不依赖 S3、LFS 或中心存储服务。
 
 main 上仅运行档案变化不使输入失效；交付比较排除 runs 目录后的正式内容，在最新 main 上保留档案并应用成果。Agent 不直接写 main，Git Manager 根据人类确认更新正式代码。
 
@@ -284,7 +284,7 @@ main 上仅运行档案变化不使输入失效；交付比较排除 runs 目录
 
 只清理已解决或被人类明确丢弃的记录，保留未处理问题及仍被有效引用的证据。验证失败不删除。依据写进改进 Commit，引用删除前的 Git 文件；历史继续可追溯。目标是减少当前目录和 Agent 上下文，不改写 Git 历史以压缩仓库。
 
-完整对话、临时输出和大日志保存在 Git 外，不自建第二套 Artifact 版本系统。Worker 容器不获得 main 凭据、可写共享 Git 元数据或 Podman 管理 Socket；Worktree 之外仍需执行限制与挂载隔离。
+完整对话和大日志的持久内容保存在本地 Artifact 库，临时输出不作为唯一证据，不自建第二套 Artifact 版本系统。内容默认保留，人工 purge 另行检查依赖，只删除当前 clone 的副本；Git 历史与协作者副本不受影响，回退 Git 不会恢复已删除文件。Worker 容器不获得 main 凭据、整个 Artifact 库、可写共享 Git 元数据或 Podman 管理 Socket；Worktree 之外仍需执行限制与挂载隔离。
 
 ## 8. Podman：隔离 Agent 与开发环境
 
@@ -294,7 +294,7 @@ main 上仅运行档案变化不使输入失效；交付比较排除 runs 目录
 - 不同 Attempt 使用独立容器、Worktree 与原生会话；同一 Worker 可在检查预算内续接 Agent 多次修复。回收前确认退出并持久化证据。
 - 一次性测试或高敏感检查可用 `--rm` 临时容器。
 - 并行写入的 Combination Worker 使用独立 Worktree + 容器。
-- 代码和 Artifact 在 Git Worktree，工具链在镜像，依赖缓存可在受控 Volume；容器内部临时状态不应成为唯一结果来源。
+- 代码在 Git Worktree，持久 Artifact 在本地内容库，工具链在镜像，依赖缓存可在受控 Volume；容器内部临时状态不应成为唯一结果来源。
 - Git Stage/Commit/Merge 由宿主机可信 Git Manager 负责，不让 Agent 拥有跨分支修改权限。
 - Android 模拟器、设备/KVM 等特殊测试任务可使用单独受控的执行环境，不给普通编码 Agent 默认特权容器。
 
@@ -319,7 +319,7 @@ Runtime 持久化本地就绪队列、活动 Attempt、Worker/容器引用、重
 
 ### 9.3 多用户边界
 
-每位协作者在自己的 clone 运行。Git Remote 异步共享已提交定义与运行证据，不共享实时队列或 Worker 状态。新 Requirement Version 取代旧版本后，其他 clone 在下次同步时停止旧运行；发布或集成前须刷新当前版本指针，过期结果不得成为有效成果。实时停止和共享运行面板需要后续引入协作服务。
+每位协作者在自己的 clone 运行。Git Remote 异步共享已提交定义、运行档案和证据引用，不共享实时队列、Worker 状态或本地 Artifact 字节；后者通过独立交换包显式传递，尚未导入不等于运行失败，需要材料的审核与恢复须等待内容补齐。新 Requirement Version 取代旧版本后，其他 clone 在下次同步时停止旧运行；发布或集成前须刷新当前版本指针，过期结果不得成为有效成果。实时停止和共享运行面板需要后续引入协作服务。
 
 ## 10. 一条完整需求的端到端示例
 

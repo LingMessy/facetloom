@@ -8,7 +8,7 @@
 | 01 | [Workflow](01-workflow.md) | Facet、Node、Combination 与组合 DAG |
 | 02 | [Requirement](02-requirement.md) | 需求版本、运行对象和状态推进 |
 | 03 | [Governance](03-governance.md) | 成果审核、错误处置、四种模式与 Refinement |
-| 04 | [Execution](04-execution.md) | 上下文、Checkpoint、证据与交付 |
+| 04 | [Execution](04-execution.md) | 上下文、Checkpoint、Artifact 存储与交换、交付 |
 | 05 | [Services](05-services.md) | Runtime、Git、容器与 Agent 的职责 |
 | 06 | [WebUI](06-user-interface.md) | 查看运行、审核成果、精炼记录 |
 | 07 | [Demo](07-demo.md) | 从需求到交付和精炼的完整场景 |
@@ -55,6 +55,7 @@ FacetLoom 编排外部 Agent，不实现模型推理或工具循环。Podman 镜
 | IntegrationReport / DeliveryRecord | 最终候选、检查与一次成功交付回执 | main 的运行档案 |
 | Refinement | 筛选记录、提出并落实改进的交互过程 | 本地会话；结果体现在 main 的修改与 Commit 描述 |
 | Worker / Invocation | 一个 Attempt 的执行生命周期及一次外部调用 | clone-local；必要调用证据导出为 Artifact |
+| Artifact / Artifact 交换包 | 大型证据及其显式跨 clone 传递 | 本地内容库；交换包经现有渠道独立传递 |
 | Runtime State | 队列、容器和未发布操作 | clone-local；SQLite 可选 |
 
 Attempt 先以 preparing 持久化，再形成输入和 Context Snapshot；准备失败也有可审核的错误记录。Context Snapshot 保存有效上下文清单，交给外部程序的实际输入由 Attempt / GateReport 引用持久 Artifact。执行与必要检查完成后冻结审核输入；后续 Gate 报告是审核输出，不回写执行证据。审核定义统一由 source_commit 固定，本地只配置凭据、连接和资源上限。
@@ -77,6 +78,23 @@ main                         # 正式定义、已接受代码、精简运行档�
 Git 分支只有 `main`。DAG 分支由独立 Worktree 执行；输入与 Checkpoint Commit 是本地执行对象，不需要命名分支。Git Manager 为活动 Worktree 保留本地对象；需要长期或跨 clone 复核的快照导出为持久 Git bundle Artifact。YAML 中的 Commit ID 本身不保证对象可恢复。
 
 每位协作者在自己的 clone 创建不同 `run_id`。同一 Run 由创建它的 Runtime 推进；协作者同步 main 查看已发布档案，向拥有者提交审核请求。首阶段不支持跨 clone 接管活动 Worker。
+
+## 本地优先的证据协作
+
+通常，一个需求由协作者在自己的 clone 中执行，产生的 Artifact 主要用于该 clone 内的审核、排错和恢复。只有跨人复核、问题移交等少数场景需要分享原始材料。因此，Artifact 默认本地持久保存，跨 clone 共享通过显式导出和导入完成，无需为日常运行部署共享存储服务。
+
+```text
+clone A                            clone B
+Git 精简档案 ──── push/pull ──────→ Git 精简档案
+本地 Artifact 库                    本地 Artifact 库
+     ↓ 导出                              ↑ 校验并导入
+     └── 独立 Artifact 交换包 ────────────┘
+             经现有渠道传递
+```
+
+Artifact URI 标识内容，不是下载地址。发布档案前只要求发布方本地持久可读；其它 clone 可先阅读摘要，缺少的材料通过交换包补齐后再审核或恢复代码。代码恢复用的 Git bundle 是包内的一种 Artifact。存储和传输规则集中见 [Execution](04-execution.md#artifact-存储与交换)。
+
+默认无需 S3、Git LFS 或中心存储服务。内容长期保留，人工 purge 只清理当前 clone 的副本，不能承诺删除协作者或备份中的内容；Refinement 不自动删除 Artifact。
 
 ## 文件布局
 
@@ -112,19 +130,20 @@ Git 分支只有 `main`。DAG 分支由独立 Worktree 执行；输入与 Checkp
     ├── workers/<attempt-id>.yaml          # Worker 与停止意图
     ├── invocations/<invocation-id>.yaml    # 版本、输入、会话与退出状态
     ├── gate-tasks/<report-id>.yaml         # 活动评估、取消与恢复
+    ├── artifacts/                        # 持久内容库、导入与本地清理回执
     ├── logs/
     ├── refinements/<refinement-id>/
     └── runtime.sqlite                    # 可选
 ```
 
-每个对象独立保存，便于引用和按项清理；文件内容保持简短。main 不收录完整 Agent 对话、心跳与临时输出。可追溯输入指 FacetLoom 实际交给外部程序的内容，不能等同于外部 Agent 发给模型的内部请求。大型证据保存在 Git 外的持久位置，档案保存 URI 和摘要。
+每个对象独立保存，便于引用和按项清理；文件内容保持简短。main 不收录完整 Agent 对话、心跳与临时输出。可追溯输入指 FacetLoom 实际交给外部程序的内容，不能等同于外部 Agent 发给模型的内部请求。大型证据保存在本地 Artifact 库，档案保存内容 URI 和摘要。`.runtime/` 同时包含活动状态与持久内容，不能作为缓存整体清空。
 
 ## 五条不变量
 
 1. **输入固定**：一个 `source_commit` 固定需求、定义、引用资料和代码基线；`.facetloom/runs/` 不参与执行输入。
 2. **图固定**：一次 Run 的 `dag.yaml` 创建后不变；重试与恢复复用它。
 3. **成果隔离**：Worker 修改发生在独立 Worktree；main 代码更新经过人类确认和最终检查。
-4. **恢复有边界**：Git 恢复已发布证据，本地持久状态恢复活动运行；未发布状态不能仅靠 Git 重建。
+4. **恢复有边界**：Git 恢复已发布档案，Artifact 内容另行保留或导入，本地状态恢复活动运行；Git 不保证恢复全部证据或未发布状态。
 5. **精炼可追溯**：已处理档案可从当前目录删除；改进 Commit 引用删除前的证据，Git 历史不改写。
 
 每个 Run 最多一次成功交付，重复请求返回已有结果。最终候选未改变代码时只提交经检查和人类确认的 no_change 回执，不创建空代码 Commit。
