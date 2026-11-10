@@ -88,6 +88,7 @@ WorkflowRun 的必需字段如下：
 | `run_id` | 是 | UUIDv4 运行 ID；创建后不变。 |
 | `requirement_version_id` | 是 | 固定的 Requirement Version ID。 |
 | `source_commit` | 是 | 同一仓库中定义与根代码基线的不可变 Git Commit。 |
+| `replaces_run_id` | 是 | 本 Run 替代的旧 WorkflowRun；普通新运行填 `null`。非空时须指向同一项目内已发布且未终态的 Run，且只能有一个未终态替代 Run。 |
 | `requirement_path` | 是 | `source_commit` 中 Requirement Version 文件的仓库相对路径。 |
 | `current_pointer_path` | 是 | `source_commit` 中 `current.yaml` 的仓库相对路径；启动时验证其指向 `requirement_version_id`。 |
 | `workflow_id` | 是 | `source_commit` 中使用的 Workflow 稳定 ID。 |
@@ -108,10 +109,11 @@ WorkflowRun 的必需字段如下：
 
 1. 获取 main 最新头，固定完整 OID 为 `source_commit`。
 2. 校验 current 指针、Requirement、Workflow、Facet、必要检查、执行与评估的 runner、成果及错误 Gate 策略、评估器配置和引用资料；拒绝引用运行档案作为定义或资料输入。
-3. 生成并校验 DAG，将 run.yaml、dag.yaml 和初始状态原子持久化到本地，再发布初始精简档案到 main。
-4. 再次同步检查 current 指针。需求已过期则取消；否则调度节点。仅运行档案的提交不影响固定输入。
+3. 生成并校验 DAG。若为替代运行，刷新 main 并验证目标 Run 已发布、未终态且尚无替代 Run；并发冲突时重新读取并拒绝重复替代。将 `replaces_run_id`、run.yaml、dag.yaml 和初始状态原子持久化到本地，再发布初始精简档案到 main。
+4. `replaces_run_id` 非空时，若旧 Run 由当前 Runtime 拥有，则新 Run 初始档案发布成功后立即取消旧 Run；若由其它 clone 拥有，旧 Run 的所属 Runtime 在下次同步 main 并看到替代关联时停止、取消旧 Run。新 Run 发布失败时不得先取消旧 Run；Git 不提供跨 clone 的即时取消通知。
+5. 再次同步检查 current 指针。需求已过期则取消；否则调度节点。仅运行档案的提交不影响固定输入。
 
-输入、`runners`、`error_gate`、`merge_engine` 和 `owner_runtime_id` 创建后不变；状态、原因与更新时间可推进。main 的记录提交不能修改 `source_commit`。交付基线规则见 [Execution](04-execution.md)。
+输入、`replaces_run_id`、`runners`、`error_gate`、`merge_engine` 和 `owner_runtime_id` 创建后不变；状态、原因与更新时间可推进。main 的记录提交不能修改 `source_commit`。交付基线规则见 [Execution](04-execution.md)。
 
 | 状态 | 定义 |
 | --- | --- |
@@ -174,6 +176,7 @@ schema_version: 1
 run_id: 5f6e9c6e-2ee9-4f17-9c75-87234be8e4ba
 requirement_version_id: REQ-001/r1
 source_commit: 8b8c0f1...
+replaces_run_id: null
 requirement_path: .facetloom/requirements/REQ-001/r1.md
 current_pointer_path: .facetloom/requirements/REQ-001/current.yaml
 workflow_id: development
@@ -285,6 +288,7 @@ updated_at: "2026-11-09T12:00:00Z"
 | --- | --- | --- |
 | 前驱满足且获得调度资格 | 创建 preparing | running |
 | 输入与上下文准备完成 | pending；Worker 启动后 running | running |
+| Pre-Assess 返回 `blocked`，或结构化输出/证据导入失败 | failed，冻结可形成的 PreAssessReport、Invocation 与 ErrorRecord | waiting_gate，设置 active_error_ref；后继不解锁 |
 | 准备或执行失败 | failed，冻结 ErrorRecord | waiting_gate，设置 active_error_ref；后继不解锁 |
 | 成果、检查和证据完整 | waiting_gate，冻结成果输入 | waiting_gate；active_error_ref 为空 |
 | 成果 Gate 部分批准 | 保持 waiting_gate | 等待其他项 |
@@ -293,6 +297,7 @@ updated_at: "2026-11-09T12:00:00Z"
 | 发现必需执行材料缺失，决定补测 | failed，保留已有审核记录，创建 ErrorRecord | waiting_gate，转错误处置；不修改冻结成果 |
 | 成果评估器故障或无法判断 | 保持 waiting_gate | 原项人工接管或重评，其他项可继续 |
 | 错误 Gate 选择 retry_current 并发布 | 旧终态不变，之后创建新 Attempt | pending，清空当前错误引用；后继仍等待 |
+| Pre-Assess 因固定外部引用暂时不可用而 wait | 旧 Attempt 与 ErrorRecord 保留 | blocked，条件恢复后重新处置原错误 |
 | 错误 Gate 选择 repair_upstream 并发布 | 停止失效范围内活动 Attempt | 目标与全部后继 stale，按依赖重新执行 |
 | 错误 Gate 选择 wait / 自身故障或额度耗尽 | 旧终态不变 | blocked，保留错误引用与原因 |
 | 输入失效 | 活动 Attempt cancelled；终态保持 | stale，清空 accepted_attempt_id |
@@ -308,17 +313,19 @@ updated_at: "2026-11-09T12:00:00Z"
 不可变 ErrorRecord → Workflow 错误 Gate
     ├── retry_current → 新 Attempt
     ├── repair_upstream → 祖先及全部后继 stale → 按依赖新建 Attempt
-    ├── wait → blocked → 条件补齐后重新处置原错误
+    ├── wait（固定外部引用暂不可用）→ blocked → 恢复后重试
     └── stop_run → 取消未结束运行
 ```
 
-恢复动作必须引用错误决定。自动恢复预算按整个 Run 共享，默认 3 次；一次 retry_current 或 repair_upstream 各计一次，后者触发的后继重执行不另计。AI/脚本决定安排恢复时，Runtime 在同一事务中记录动作 ID、消耗额度和失效范围；重复重放不再扣减。额度耗尽只允许 wait 或 stop_run，继续恢复须人类决策。人工及 ai_assisted 人类确认的恢复不消耗自动额度，也不重置已有计数。
+恢复动作必须引用错误决定。自动恢复预算按整个 Run 共享，默认 3 次；一次 retry_current 或 repair_upstream 各计一次，后者触发的后继重执行不另计。AI/脚本决定安排恢复时，Runtime 在同一事务中记录动作 ID、消耗额度和失效范围；重复重放不再扣减。额度耗尽后，自动评估器不能安排恢复；人类仍可决定恢复，或停止 Run。人工及 ai_assisted 人类确认的恢复不消耗自动额度，也不重置已有计数。
 
 修复目标只能是当前节点的祖先；当前节点重试使用 retry_current。Runtime 原子清除修复目标和全部可达后继的有效成果引用，持久化停止意图，拒收迟到任务结果；无依赖分支继续。目标在其前驱满足后 pending，后继依次等待新成果。历史 accepted、rejected 和 failed Attempt 不改写。
 
-每个新 Attempt 仍按根基线或当前有效前驱构造输入；失败或拒绝的代码仅作显式证据，不自动成为输入。新 Snapshot 包含处置决定、修复要求与原错误引用。输入确实相同时可复用 Snapshot，但全部成果 Gate 重新审核。
+每个新 Attempt 仍按根基线或当前有效前驱构造输入；失败或拒绝的代码仅作显式证据，不自动成为输入。新的或变化的任务指令进入新 Context Snapshot，并包含处置决定、修复要求与原错误引用；只有在输入内容完全相同时才可复用 Snapshot，且新 Attempt 的全部成果 Gate 仍须重新审核。
 
-错误 Gate 不能修改 Requirement、Scope、执行定义或审核策略；此类变化发布后新建 Run。completed / cancelled Run 不重新打开；最终汇聚或交付失败保留 IntegrationReport，修改成果须新 Run。
+`wait` 仅适用于 Pre-Assess 已确认的固定外部引用暂时不可读取。等待期间 Run 与 CombinationRun 保持 blocked，原 Attempt、ErrorRecord 和 Context Snapshot 不变；Runtime 不自动轮询或重发调用。引用恢复可读后，用户显式请求重新处置同一 ErrorRecord；错误 Gate 按固定模式重新评估并生成决定。决定为 `retry_current` 时，新 Attempt 复用原 Snapshot 并重新运行 Pre-Assess。
+
+如果需要替换引用、补充需求内容、调整 Requirement、Workflow、Facet、Scope、runner 或其它执行上下文，必须先将定义和资料提交到 main，再创建固定新 Commit 的 WorkflowRun。新 Run 以 `replaces_run_id` 指明被替代的未终态 Run；若旧 Run 属于同一个 Runtime，则新 Run 初始档案成功发布后立即取消旧 Run；若属于其它 clone，则由旧 Run 的所属 Runtime 在下次同步时停止、取消旧 Run。保留旧运行记录；新 Run 初始档案发布失败时不得取消旧 Run。Git 不提供跨 clone 即时取消通知。不得修改旧 Snapshot 或在旧 Run 中追加输入。错误 Gate 不能修改 Requirement、Scope、执行定义或审核策略。completed / cancelled Run 不重新打开；最终汇聚或交付失败保留 IntegrationReport，修改成果须新 Run。
 
 ### 状态原因
 
@@ -335,7 +342,7 @@ status_reason:
       digest: sha256:<digest>
 ```
 
-code 为机器可读字符串，message 非空，related_refs 使用 Execution 的类型化引用。常用码包括 preparation_failed、worker_lost、execution_failed、gate_rejected、gate_pending、upstream_invalidated、upstream_misaligned、requirement_superseded、permission_denied、input_conflict、recovery_budget_exhausted、error_gate_failed、user_cancelled。
+code 为机器可读字符串，message 非空，related_refs 使用 Execution 的类型化引用。常用码包括 preparation_failed、pre_assess_blocked、pre_assess_failed、post_assess_failed、evidence_import_failed、evidence_reference_invalid、worker_lost、execution_failed、gate_rejected、gate_pending、upstream_invalidated、upstream_misaligned、requirement_superseded、permission_denied、input_conflict、recovery_budget_exhausted、error_gate_failed、user_cancelled。
 
 ## Attempt
 

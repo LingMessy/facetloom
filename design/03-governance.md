@@ -93,7 +93,8 @@ Runtime / Git Manager → 校验主体与策略，保存决策，汇总并发布
 | evaluator | 评估器 ID、kind；实际外部 Agent 与 Adapter 版本、runner 摘要、原生会话及可观测模型/工具信息另记在此；未知项为 null |
 | status | completed 或 error |
 | result | completed 时为 Approved、Rejected、Escalated 或 Blocked；error 时为 null |
-| rationale、evidence_refs | 非空说明和证据引用列表；error 时说明故障 |
+| rationale、evidence_refs | 非空说明和证据引用列表；error 时说明故障。AI 原始输出的引用只能选自本次请求提供的白名单 |
+| evidence_files | 仅 AI 原始输出使用：本次调用生成证据的相对路径；Adapter 导入后只在持久 GateReport 中保存 Artifact `evidence_refs` |
 | created_at | UTC ISO 8601 |
 
 Runtime 在调用前分配 report_id，持久化本地任务与实际初始请求；发布报告前将请求保存为持久 Artifact 并校验引用，留存范围见 [Execution](04-execution.md)。请求固定上述身份、上下文、策略、输入/输出 Commit 和冻结的执行证据。审核者可读取 Requirement、任务上下文及自己的审核要求；运行档案只按显式证据引用提供，不作为项目定义输入。
@@ -104,11 +105,12 @@ Runtime 在调用前分配 report_id，持久化本地任务与实际初始请�
 {
   "result": "Approved",
   "rationale": "领域依赖检查通过",
-  "evidence_refs": []
+  "evidence_refs": [],
+  "evidence_files": []
 }
 ```
 
-外部 Agent 经 Adapter 返回同样的结果结构。原生成功退出但未返回完整有效结构时为 error，不由 Runtime 用另一模型补写决策。`rationale` 必须非空，证据沿用 [Execution](04-execution.md) 的类型化引用。脚本正常退出且返回有效结果才为 completed；退出非零、超时、无效输出或缺失证据引用为 error，不能把退出码直接当成拒绝。程序可以正常退出并返回 Rejected。
+外部 Agent 经 Adapter 返回同样的结果结构。其 `evidence_refs` 只能包含评估请求显式提供的证据引用；`evidence_files` 按 [Execution](04-execution.md) 的统一协议验证和导入。持久 GateReport 只保存规范化的类型化 `evidence_refs`，不保留 `evidence_files`。原生成功退出但未返回完整有效结构时为 error，不由 Runtime 用另一模型补写决策。`rationale` 必须非空。脚本正常退出且返回有效结果才为 completed；退出非零、超时、无效输出或缺失/越权引用为 error，不能把退出码直接当成拒绝。程序可以正常退出并返回 Rejected。
 
 AI 调用的初始请求与执行回执按 Execution 规则留存，实际后续输入和原生事件通过本项报告证据引用。
 
@@ -218,10 +220,11 @@ flowchart TD
 | --- | --- |
 | schema_version、error_id | 格式为 1，UUIDv4 |
 | run_id、combination_id、attempt_id | 所属失败或拒绝的尝试 |
-| stage | preparation / execution / checks / result_review |
-| code、message | 机器可读原因码与非空说明 |
+| stage | preparation / pre_assess / execution / checks / post_assess / result_review |
+| code、message | 机器可读原因码与非空说明；常用原因包括 `pre_assess_blocked`、`pre_assess_failed`、`post_assess_failed`、`evidence_import_failed`、`evidence_reference_invalid` |
 | context_snapshot_ref、input_commit | 已形成的固定输入；未形成可为 null |
 | evidence_refs | 已保存的实际材料；不要求有代码输出或 Agent 请求 |
+| wait_condition | 可空；仅对有效的 `pre_assess` / `pre_assess_blocked` ErrorRecord，且其 PreAssessReport 的 `missing_inputs[].source_refs` 列出该引用时填写 `{kind: fixed_reference_unavailable, source_ref, observation, checked_at}`。`source_ref` 是 Snapshot 中完整类型化引用，摘要必须匹配；`checked_at` 为 UTC ISO 8601。Agent 自述不能单独建立此字段 |
 | related_predecessors | 相关 combination_id、attempt_id、output_commit；未知时空列表 |
 | trigger_decision_ref | 成果拒绝时必填；其他情况可空 |
 | created_at | UTC ISO 8601 |
@@ -238,6 +241,7 @@ message: src/shared/config.py 的汇聚冲突超出有效写入范围
 context_snapshot_ref: null
 input_commit: null
 evidence_refs: []
+wait_condition: null
 related_predecessors: []
 trigger_decision_ref: null
 created_at: "2026-11-09T12:00:00Z"
@@ -258,30 +262,33 @@ created_at: "2026-11-09T12:00:00Z"
 | review_input_digest | 错误审核摘要，算法见下文 |
 | previous_decision_id | 同一错误的上一决定；首次 null，wait 后可以新决定继续处置 |
 | result | 不使用此字段，避免把动作解释成成果批准 |
-| action | completed 报告及 Decision 必填：retry_current / repair_upstream / wait / stop_run |
+| action | completed 报告及 Decision 必填：retry_current / repair_upstream / wait / stop_run；`wait` 仅用于固定外部引用暂时不可读取 |
 | repair_target_combination_id、repair_instruction | repair_upstream 必填；其他动作不填 |
 | context_snapshot_ref、evaluated_tree | 不作为错误协议字段；可用输入从 ErrorRecord 读取 |
 | expected_combination_digest | Decision 必填，替代 expected_attempt_digest，保护当前错误与节点状态 |
 
 review_input_digest 为 `{review_kind: "error", error_ref, gate_policy_digest}` 按 RFC 8785 JCS 规范化后的 SHA-256。审核请求带完整 ErrorRecord、错误策略、当前节点状态、剩余额度及此摘要对象；状态和额度是操作可行性提示，不属于不可变错误事实，落地前必须重新校验。
 
-脚本仍由 stdin 接收 JSON，stdout 返回一个对象；AI Adapter 使用相同返回结构：
+脚本仍由 stdin 接收 JSON，stdout 返回一个对象；AI Adapter 使用相同返回结构。AI 原始输出可另含 `evidence_files`，Script Gate 不支持该字段：
 
 ```json
 {
   "action": "retry_current",
   "rationale": "环境已恢复，按原固定输入重新执行",
-  "evidence_refs": []
+  "evidence_refs": [],
+  "evidence_files": []
 }
 ```
 
-报告沿用 status=completed / error。error 报告不填 action，保存实际 request_input_ref；请求未形成才允许 null。human / ai_assisted 最终决定由人类作出，ai / script 的有效报告由 Runtime 转成同一动作的 Decision。人工接管保留原策略与故障依据。错误报告只更新 CombinationRun.error_report_ref，不写入旧 Attempt 的成果映射。
+报告沿用 status=completed / error。AI 原始 `evidence_refs` 限于审核请求提供的白名单，`evidence_files` 使用统一证据导入协议；持久 GateReport 仅保留规范化类型化引用。error 报告不填 action，保存实际 request_input_ref；请求未形成才允许 null。human / ai_assisted 最终决定由人类作出，ai / script 的有效报告由 Runtime 转成同一动作的 Decision。人工接管保留原策略与故障依据。错误报告只更新 CombinationRun.error_report_ref，不写入旧 Attempt 的成果映射。
+
+Runtime 在生成 Decision 前按 ErrorRecord 和当前外部引用状态校验恢复动作。`wait` 仅在 `wait_condition` 非空且引用仍因暂时性可用性故障不可读时有效。若无等待条件，或引用已经恢复可读，评估器返回的 `wait` 都按无效动作处理为评估故障，不生成 Decision，也不改变 CombinationRun 状态；转人工接管或重新评估。人类界面同样不提供不符合条件的 wait 操作。恢复后由用户显式请求按固定 Gate 模式重新评估，Runtime 不自动轮询。
 
 | 动作 | Runtime 校验与效果 |
 | --- | --- |
-| retry_current | 原节点输入仍有效，旧 Worker 已停止或隔离；发布后新建 Attempt |
+| retry_current | 原节点输入仍有效，旧 Worker 已停止或隔离；发布后新建 Attempt。对 `pre_assess_blocked`，仅在 `wait_condition` 非空且 Runtime 确认同一引用已恢复、内容摘要匹配时可重试，并须复用原 Context Snapshot；若缺少需求信息或需变更输入，不能在该 Run 重试，必须创建替代 Run |
 | repair_upstream | 目标为同 Run 祖先，指令非空；发布后目标及全部后继失效、按 DAG 重执行 |
-| wait | 节点 blocked，保留 active_error_ref；条件补齐后人类可以重评或直接处置原错误 |
+| wait | 仅当 ErrorRecord.wait_condition 非空且该引用仍暂时不可读时有效；节点 blocked 并保留 active_error_ref，不自动轮询或重发。引用恢复后需显式按固定 Gate 模式重新评估；retry_current 创建的新 Attempt 复用原 Snapshot |
 | stop_run | 取消尚未结束的 Run，停止其活动任务；已接受历史不改写 |
 
 错误决定文件示例：

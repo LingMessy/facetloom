@@ -30,7 +30,7 @@ flowchart LR
 | --- | --- |
 | 固定 DAG、CombinationRun | 调度 pending 且所有直接前驱 satisfied 的节点 |
 | 本地 Attempt、Worker 与容器 | 对账、恢复；无法恢复则 failed 并创建 ErrorRecord，不重复启动 |
-| main 当前需求指针 | 同步后取消被新版取代的未终态 Run |
+| main 当前需求指针与 `replaces_run_id` | 同步后取消被新版取代的未终态 Run；跨 clone 仅在下次同步时可见 |
 | Gate 报告与决策 | 成果全部批准发布后接受；拒绝转错误 Gate；错误动作串行校验额度与依赖，发布后执行 |
 | 关键运行事件 | 整理结果与证据，进入待发布队列 |
 
@@ -141,6 +141,7 @@ Git Manager 是唯一执行受信 Git 写入的组件；管理 main、隔离 Wor
 | 创建运行 | source_commit、当前需求、定义、DAG 与 Run ID 唯一性 |
 | 保存 Checkpoint | Attempt、输入、分组写入 Scope、outcome 与 Tree 一致性、取消或失效状态 |
 | 保存 CheckReport | Snapshot 检查清单、真实执行记录、修复次数与最终 Tree，禁止 Worker 自报通过替代结果 |
+| 导入 Agent 证据 | 引用属于调用输入白名单；路径、文件类型、数量、单项/合计大小、摘要与 Artifact 持久性全部通过后才发布规范化结果 |
 | 发布档案 | owner_runtime_id、预期记录摘要、ID、引用和持久证据 |
 | 发布成果 waiting_gate | 最终 Tree 的全部检查有结果、agent_input_ref 与执行证据持久可读、固定字段与 review_input_digest 一致 |
 | 发布错误 waiting_gate | failed / rejected Attempt、ErrorRecord 与可用证据已保存，错误策略有效；不要求成果字段 |
@@ -159,7 +160,7 @@ Git Manager 是唯一执行受信 Git 写入的组件；管理 main、隔离 Wor
 | publication_kind | 内容 | 校验 |
 | --- | --- | --- |
 | archive | 错误、取消、历史证据与已发生事实 | 可归档旧需求；不能接受成果、恢复执行或改正式代码 |
-| advance | 初始运行发布、正式审核请求、成果接受、恢复决定与执行解锁 | 必须仍为当前需求、当前有效 Run / Attempt / 错误 |
+| advance | 初始运行发布、正式审核请求、成果接受、恢复决定与执行解锁 | 必须仍为当前需求、当前有效 Run / Attempt / 错误；刷新 main 后若发现该 Run 已被 `replaces_run_id` 指向，则拒绝任何后续推进 |
 | delivery | 正式代码交付或 no_change 成功回执 | 需求、基线、固定报告、确认及唯一交付全部有效 |
 
 既有报告/决定可作为历史证据归档，但不能因归档而变成有效批准。未完成报告仍须满足引用可读和摘要规则。生效发布先保存在本地 outbox，主状态不提前变成 accepted / satisfied，也不解锁后继；待发布视图与已生效状态分别展示。
@@ -233,7 +234,7 @@ Refinement 是 Runtime 提供的本地交互功能，不是独立共享审批服
 
 网络为 disabled / outbound；outbound 供外部 Agent 访问模型服务，并受 Runtime 可实施的网络策略限制。只有明确提供可达本地服务或不需要联网的任务才可使用 disabled；纯脚本及必要检查可独立禁网。拒绝无法满足的配置，不将禁网失败误报为代码测试失败。
 
-成果 AI Gate 在新容器/会话中读取固定候选的只读副本，缓存和临时产物位于独立可写目录；错误 Gate 读取 ErrorRecord 与可用证据。即使原生 Agent 关闭内部沙箱，也不能写原 Worker 成果或 main。最终检查与精炼验证使用独立候选副本。
+成果 AI Gate 在新容器/会话中读取固定候选的只读副本，缓存和临时产物位于独立可写目录；错误 Gate 读取 ErrorRecord 与可用证据。每次 Agent Invocation 另有新的专用 `evidence-out/` 目录，以只读输入和可写输出挂载给容器；它与项目 Worktree、原始候选和 Artifact Store 隔离。AI Gate 与 Refinement 的外部 Agent 使用同一证据文件导入协议；Script Gate 只返回已校验的类型化证据引用。即使原生 Agent 关闭内部沙箱，也不能写原 Worker 成果或 main。最终检查与精炼验证使用独立候选副本。
 
 ### Worker、调用与会话
 
@@ -243,7 +244,7 @@ Refinement 是 Runtime 提供的本地交互功能，不是独立共享审批服
 | Invocation | 一次外部 CLI 启动或原生协议请求，含 task_kind | invocations/<invocation-id>.yaml |
 | Native session | 外部 Agent 自己维护的会话；ID 可为空 | 每次任务独立目录；Invocation 保存引用 |
 
-一个 Attempt 最多创建一个 Worker；同一 Worker 可在预算内发起多个串行 Invocation，不能并行修改同一 Worktree。Pre-Assess 与 Post-Assess 分别使用独立的只读容器和新会话；不创建额外 Worker。只有原生支持并能核实身份时才续接执行/修复会话；续接失败进入错误 Gate，预检和自检不续接执行会话。
+一个 Attempt 最多创建一个 Worker；同一 Worker 可在预算内发起多个串行 Invocation，不能并行修改同一 Worktree。Pre-Assess 与 Post-Assess 分别使用独立的只读容器和新会话；不创建额外 Worker。只读指项目输入与候选成果，证据输出目录单独可写。只有原生支持并能核实身份时才续接执行/修复会话；续接失败进入错误 Gate，预检和自检不续接执行会话。
 
 ~~~yaml
 schema_version: 1
@@ -269,7 +270,7 @@ stopped_at: null
 
 Worker 状态为 pending / running / stop_requested / stopped / unknown，独立于 Attempt 状态。进程引用不能只记 PID：同时记录容器 ID、进程启动身份与 invocation_id，避免 PID 复用误停止其他任务。退出状态以原生调用结果与实际容器对账为准。
 
-Invocation 文件使用以下字段；AI Gate 和 Refinement 也共用此记录，不为它们创建业务 Attempt 或 Worker。
+Invocation 文件使用以下字段；Adapter 把独立目录以 `/facetloom/evidence-out` 挂载，并在固定请求中指示 Agent 只在此目录写入本次证据。AI Gate 和 Refinement 也共用此记录，不为它们创建业务 Attempt 或 Worker。
 
 | 字段 | 定义 |
 | --- | --- |
@@ -277,13 +278,16 @@ Invocation 文件使用以下字段；AI Gate 和 Refinement 也共用此记录�
 | owner、task_kind | owner 为 `{kind: worker/gate/refinement, id: <所属 ID>}`；task_kind 为 pre_assess / execute / repair / post_assess / evaluate / refine |
 | runner_id、runner_profile_digest | 所属 Run 或精炼会话内的固定调用配置 |
 | adapter_version、agent_version、image_ref | 实际 Adapter / Agent 版本及镜像 digest；程序尚未探测成功时版本可为 null |
-| argv、input_ref、result_ref | 实际参数、发送前固定的输入 Artifact 和结构化结果 Artifact；不含凭据 |
+| argv、input_ref、native_output_ref、result_ref | 实际参数、发送前固定的输入 Artifact、原生结构化输出与 Adapter 规范化结果；不含凭据。失败时规范化结果可为空 |
+| evidence_dir、evidence_imports、evidence_refs | 每次调用独立的临时输出目录、逐文件导入回执及成功导入的不可变证据引用；目录本身不是持久引用 |
 | native_session_id、previous_invocation_id | 原生会话与上一调用；首次或原生不支持时可为 null |
 | container_id、process_identity | 本次调用的容器及进程启动身份；启动前可为空 |
 | status | pending / running / stop_requested / succeeded / failed / cancelled / unknown；succeeded 只表示原生调用成功退出 |
 | started_at、deadline_at、finished_at | UTC ISO 8601；未开始或未结束的相应字段为 null，执行调用不得超出 Worker deadline |
 | stop_requested_at、stop_reason、stop_deadline_at | 持久化停止意图、原因与强制终止截止时间；无停止请求时为 null |
 | exit_code、event_refs | 实际退出码与可观测事件引用；未形成时为空 |
+
+每次 Invocation 在调用前创建空的独立 `evidence-out/`，只将该目录挂载到对应容器。容器退出确认后 Adapter 冻结该目录，保存原生输出，校验结构化响应与本次输入提供的证据引用白名单，再按 [Execution](04-execution.md) 的路径规则、单文件和总量上限暂存、摘要校验并导入文件。全部文件导入成功后才生成 `result_ref` 与规范化 `evidence_refs`；失败时两者均不得作为成功结果发布，Invocation 记录故障，ErrorRecord 可引用原生输出及可用诊断材料。导入中已写入但无有效引用的 Artifact 不构成部分 Report，可在确认没有引用后回收。
 
 续接只能引用同一 Attempt 的 execute / repair 调用、相同固定 runner 的原生会话；Post-Assess 不得复用可写执行容器或会话。恢复时重新核实镜像、程序版本及 Adapter 兼容性，不能静默切换运行方式。
 
@@ -304,14 +308,14 @@ Adapter 是外部程序协议适配层，不实现模型推理、工具循环或
 
 | 操作 / 能力 | 规则 |
 | --- | --- |
-| probe | 探测版本、参数、任务输入、结构化结果及事件能力；不支持能力显式报错 |
+| probe | 探测版本、参数、任务输入、结构化结果（含 `evidence_refs` 与可选 `evidence_files`）及事件能力；不支持所需能力时显式报错 |
 | start | 使用固定 runner 启动外部 Agent，传入工作目录、任务及资料；args 不经 Shell 展开 |
 | continue | 把检查失败或用户反馈传给原生会话；不支持时进入错误处置，不自己补一个 Agent 循环 |
 | recover | 可选；核实已有进程、原生会话及调用状态，不能把 unknown 当作未发送 |
 | stop | 按调用身份停止，配合容器退出确认 |
 
-Adapter 先保存每次实际调用输入，再原样传入外部程序；首次 Pre-Assess 输入使用 agent_input_ref，执行与修复等后续调用分别由 Invocation 引用输入，审核输入使用 GateReport.request_input_ref。模型服务凭据由环境或连接层注入，不进入记录；不挂载宿主机原生配置或跨 Attempt 共享会话。
+Adapter 先保存每次实际调用输入，再原样传入外部程序；首次 Pre-Assess 输入使用 agent_input_ref，执行与修复等后续调用分别由 Invocation 引用输入，审核输入使用 GateReport.request_input_ref。证据输出由 Agent 通过 `evidence_files` 提交，已有证据使用 `evidence_refs`；导入规则及上限见 [Execution](04-execution.md)。AI Gate 与 Refinement 也使用该协议，Refinement 会话记录其导入引用，Script Gate 只能引用输入中已有且已校验的类型化证据。模型服务凭据由环境或连接层注入，不进入记录；不挂载宿主机原生配置或跨 Attempt 共享会话。
 
-pre_assess 调用的原生结构化输出解析成 PreAssessReport 内容，execute / repair 解析成 ExecutionResult，post_assess 解析成 Post-AssessReport 内容，均存于 result_ref。AI Gate 输出解析为 result 或 action、rationale、evidence_refs 及条件必填修复字段。结构化输出不完整、证据引用无效或仅有成功退出码时，调用不能视为成功；Adapter 不发起第二模型调用补写结果，不创建 Decision 或接受成果。
+pre_assess 调用的原生结构化输出解析成 PreAssessReport 内容，execute / repair 解析成 ExecutionResult，post_assess 解析成 Post-AssessReport 内容，均存于 result_ref。AI Gate 输出解析为 result 或 action、rationale、evidence_refs、evidence_files 及条件必填修复字段；Refinement 返回的建议使用相同的证据字段。Adapter 将 `evidence_files` 转为正式 Artifact `evidence_refs` 后才保存规范化结果；持久报告不包含 Agent 临时路径。结构化输出不完整、证据引用越权、导入失败或仅有成功退出码时，调用不能视为成功；Adapter 不发起第二模型调用补写结果，不创建 Decision 或接受成果。
 
 FacetLoom 只承诺保存自己提供的输入和可观测事件；外部 Agent 的内部系统提示、隐藏推理、压缩过程及未暴露的模型/工具信息不在可追溯承诺内。任务执行、AI 评估、精炼使用各自隔离的原生会话。接入协议属于设计目标，不表示四种 Adapter 已全部实现。

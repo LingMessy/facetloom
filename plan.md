@@ -33,7 +33,7 @@ CLI 随各阶段提供可操作的验证入口。每阶段完成验收后进入�
 
 **依赖：** 阶段 1 的有效定义与 DAG。
 
-**交付物：** WorkflowRun、CombinationRun、Attempt 的文件事务及崩溃重放；preparing 阶段与 ErrorRecord；单 Worker 的 detached Worktree、预装外部 Agent 的 Podman 镜像及首个非交互 CLI Adapter；Worker / Invocation / 原生会话的独立记录；保留 Scope 分组的 Context Snapshot、实际初始请求留存、CheckReport、Checkpoint 和持久 Artifact；单写入者的基础档案发布；CLI 启动和查看。
+**交付物：** WorkflowRun、CombinationRun、Attempt 的文件事务及崩溃重放；preparing 阶段与 ErrorRecord；单 Worker 的 detached Worktree、预装外部 Agent 的 Podman 镜像及首个非交互 CLI Adapter；Worker / Invocation / 原生会话的独立记录；统一 Agent 证据导入协议；保留 Scope 分组的 Context Snapshot、实际初始请求留存、CheckReport、Checkpoint 和持久 Artifact；单写入者的基础档案发布；CLI 启动和查看。
 
 **验收条件：**
 
@@ -42,6 +42,8 @@ CLI 随各阶段提供可操作的验证入口。每阶段完成验收后进入�
 - 在原生免审批模式下，Worker 仍受容器、Scope 和凭据边界约束，无法直接写 main 或人类决策。
 - Adapter 完成 probe/start/continue/stop；镜像、程序、参数、配置或认证失败可定位。检查由 Runtime 独立执行，修复通过原生会话续接；缺失能力明确报错。
 - Post-Assess 以新会话和只读候选容器执行，不另建 Worker；越权修改、超时或无效结果进入错误 Gate，`concerns` 作为证据交成果 Gate 审核。
+- Pre-Assess、执行/修复、Post-Assess、AI Gate 与 Refinement 都可导入 `evidence_files`；传入 `evidence_refs` 仅允许引用本次请求白名单，Script Gate 只接受类型化引用。测试绝对/越界路径、符号链接、重复文件、数量和字节上限；导入任一文件失败时不发布部分结构化结果或报告。
+- `wait` 仅用于 Snapshot 中固定外部引用暂时不可用；恢复后重处置原错误并用同一 Snapshot 创建新 Attempt。新增或修改 Requirement、定义或上下文时创建 replacement Run 并引用旧 Run；同一 Runtime 拥有的旧 Run 在新 Run 发布后取消，其它 clone 由旧 Run 所属 Runtime 于下次同步时取消，不能虚称即时通知。
 - runner 总时限从 Pre-Assess 开始，覆盖执行、修复、检查与 Post-Assess；停止意图、30 秒默认宽限与实际退出分别持久化。
 
 ## 3. 成果与错误 Gate
@@ -54,6 +56,7 @@ CLI 随各阶段提供可操作的验证入口。每阶段完成验收后进入�
 
 - 同一 Attempt 的各项 Gate 可并行审核，全部批准并发布后才接受成果；部分批准、AI 建议或评估故障均不能提前放行。
 - 拒绝、自动评估故障、人工接管、过期请求和迟到结果按设计处理；报告更新不改变冻结的审核输入；外部程序成功退出但缺少有效结构化结论仍属故障。
+- AI 成果与错误 Gate 的 `evidence_files` 经同一隔离目录导入并写入 GateReport；越权引用或导入失败产生评估故障，不生成 Decision。Script Gate 不能返回本次调用生成的任意文件路径。
 - Post-Assess 的 `concerns` 不自动拒绝成果；其故障与无效结构化输出可恢复或人工接管，不覆盖原始检查报告。
 - 评估器故障可对原材料重评；补测或修改成果经错误处置创建新 Attempt，全部成果 Gate 重新审核。
 - 执行失败和成果拒绝进入 Workflow 错误 Gate；恢复动作不直接接受成果，默认整个 Run 最多自动恢复 3 次，耗尽转人类。
@@ -69,6 +72,7 @@ CLI 随各阶段提供可操作的验证入口。每阶段完成验收后进入�
 - 通过 CLI 跑通登录限制 Demo：分支并行、汇聚等待全部前驱、冲突处理、审核和最终交付。
 - 事务提交前后崩溃、外部调用未知、推送失败和重复操作不丢记录、不重复扣减恢复额度、不重复接受或交付；不同 clone 的档案互不覆盖，bundle 可在另一 clone 恢复代码。
 - 需求取代与上游修复正确停止或失效相关执行；过期成果不能交付，仅档案变化不使运行输入失效；旧需求仍可归档取消及历史证据。
+- Replacement Run 显式关联被替代 Run；新运行档案未发布前旧 Run 保持有效，同一 Runtime 拥有的旧 Run 在发布后取消，其它 clone 由旧 Run 所属 Runtime 在下次同步时取消；任何 clone 在发布后都不能再推进旧 Run，记录不被删除。
 - 重启不重置总 deadline；PID 复用、容器查询失败、停止未确认和原生恢复不支持时，不重复启动或误判已退出。
 - 取消撤销未发送的 advance，推送在途或确认丢失时先对账；历史终态保留，迟到批准不能解锁后继。
 - 最终检查通过并经绑定候选的人类确认后交付 main，保留最新档案；同一 Run 最多一次成功交付，无代码变化只提交回执，未形成候选不能伪造报告字段。
@@ -82,6 +86,7 @@ CLI 随各阶段提供可操作的验证入口。每阶段完成验收后进入�
 **验收条件：**
 
 - 通过界面完成 Demo，明确区分本地实时状态、已发布档案、运行完成和交付完成。
+- 调用详情能查看证据文件路径、导入状态、摘要和持久引用；整批导入失败时显示原因且无可引用的部分报告。错误页面只在固定引用暂不可读时允许 wait，并呈现同 Snapshot 重试与 replacement Run 两种恢复结果。
 - 至少一项真实运行经验转化为经验证的改进，并在同一提交中清理对应记录。
 - 部分采纳、验证失败、来源变化、会话中断和回退均可处理；保留未解决问题及有效引用，不误删活动、待审核或待交付证据。
 

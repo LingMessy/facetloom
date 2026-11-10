@@ -121,7 +121,7 @@ execution:
 
 1. 人类审阅并在 main 发布 Requirement r1、current、Workflow、Facet、runner、原生配置和审核评估器定义，准备好固定 digest 的镜像与本地凭据。
 2. Runtime 固定 source_commit，生成 DAG，先本地持久化，再发布初始精简档案。代码仍未变。
-3. Runtime 先创建 preparing Attempt，再固定代码输入与 Context Snapshot 转 pending。Adapter 探测外部 Agent、保存预检请求和 agent_input_ref，以独立只读容器运行 Pre-Assess；版本、argv 与 session_id 保存在 Invocation 中。缺少输入进入错误 Gate，风险随报告供成果 Gate 评审。
+3. Runtime 先创建 preparing Attempt，再固定代码输入与 Context Snapshot 转 pending。Adapter 探测外部 Agent、保存预检请求和 agent_input_ref，以独立只读容器运行 Pre-Assess；版本、argv 与 session_id 保存在 Invocation 中。输入缺失进入错误 Gate；只有 Snapshot 中的固定引用暂时不可读才可 wait，恢复后以相同 Snapshot 创建新 Attempt。需要补充或修改输入时先提交定义并创建关联旧 Run 的替代 Run；若两者由同一 Runtime 拥有，新 Run 发布后取消旧 Run；否则旧 Run 所属 clone 在下次同步时取消。风险随报告供成果 Gate 评审。
 4. 预检适用时启动外部 Agent，原生结构化输出经 Adapter 校验并留存 ExecutionResult；不适用时跳过执行并复用输入。Runtime 执行 Workflow 与 Node 累积的必要检查；适用任务失败时 Adapter 可续接会话修复并全量重检，不适用任务不修复但保留完整检查结果。固定最终 Tree 后生成 Checkpoint 和 CheckReport，再以新会话、只读容器运行 Post-Assess；保存预检与自检报告、bundle 和证据，固定 review_input_digest，进入 waiting_gate 并发布 main。
 5. Runtime 并行调度各项 Gate，AI 项使用独立外部 Agent 会话，脚本项直接运行程序；调用前保存实际评估请求，报告通过 request_input_ref 引用。各项报告只作为审核输出发布，不改写执行证据；全部批准和关联状态发布成功后，后继才可执行。
 6. application 与 data 并行，presentation 按稳定顺序三方汇聚，Agent 解决范围内冲突。若成果 Gate 发现缺少锁定到期恢复行为而拒绝，Attempt rejected，节点转错误处置。人类在错误 Gate 选择 repair_upstream，目标为 domain；决定发布后 domain 及其后继 stale，再按依赖重新执行。
@@ -138,11 +138,14 @@ execution:
   "schema_version": 1,
   "summary": "实现失败计数与锁定剩余时间。",
   "evidence_refs": [],
+  "evidence_files": [],
   "conflict_resolutions": []
 }
 ```
 
 Adapter 只接受各 Agent 已探测支持的原生结构化输出。Applicability 来自独立只读 Pre-Assess；Runtime 结合预检与实际 Git Tree 判断 changed/no_change/not_applicable。输出无效、Applicability 不确定或只读副本被修改均进入错误 Gate；Post-Assess 的 `concerns` 报告交由成果 Gate 审核。
+
+Agent 可在独立 `evidence-out/` 中提交证据。Adapter 校验相对路径、普通文件类型、每次最多 100 个文件、单文件 10 MiB 和合计 100 MiB，并将成功导入的内容转成 Artifact 引用。超限、符号链接、越界路径或中途导入失败都使整份结构化结果无效，不发布部分报告。AI Gate 与 Refinement 复用该协议，Script Gate 只返回已校验的类型化引用。
 
 ### 自动恢复示例
 

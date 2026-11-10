@@ -187,6 +187,42 @@ conflicts: []                 # 各步冲突并集；每项含确定性 conflict
 
 汇聚 Agent 负责正常的代码集成冲突。冲突路径超出有效写入范围时在准备阶段报 permission_denied，不启动有越界权限的 Worker。Agent 判断问题来自前驱已批准行为与需求不对齐时，报 upstream_misaligned，引用具体前驱和证据，由错误 Gate 决定是否修复上游；不得静默更改上游责任。
 
+## Agent 输出证据协议
+
+Pre-Assess、执行/修复、Post-Assess、AI Gate 与 Refinement 的外部 Agent 使用同一证据输出协议。每次 Invocation 获得一个全新的专用可写目录 `evidence-out/`，在容器内固定挂载为 `/facetloom/evidence-out`；它只用于提交本次调用生成的证据，不是项目工作目录。调用输入明确指示 Agent 将新文件写入该目录，并在结构化输出的 `evidence_files` 中给出相对路径。已有证据仍通过 `evidence_refs` 引用，但每个引用必须与本次 Invocation 输入中的引用完全一致；不得自行构造 URI 或引用未提供的 Artifact。
+
+Adapter 逐个验证并导入文件到不可变 Artifact Store，之后把 Agent 引用与新生成的类型化 Artifact 引用合并到规范化结果的 `evidence_refs`。Agent 引用必须是本次输入白名单中的引用且不得重复；规范化结果按 Agent 引用的原有次序保留，再按 `evidence_files` 声明次序追加导入引用。导入引用包含 URI、内容摘要和媒体类型；Invocation 记录提交路径、摘要及导入结果。`evidence_files` 只存在于 Agent 原始输出，不写入正式 Report、GateReport 或 Decision。
+
+Invocation 的导入回执保留 Agent 路径到不可变 Artifact 的映射：
+
+```yaml
+evidence_imports:
+  - submitted_path: pre-assess/input-check.json
+    status: committed
+    byte_length: 821
+    digest: sha256:<file-digest>
+    media_type: application/json
+    artifact_ref:
+      type: artifact
+      uri: artifacts://evidence/<immutable-key>
+      digest: sha256:<file-digest>
+```
+
+`status` 为 `committed` / `rejected` / `not_imported`；仅 `committed` 项有 `artifact_ref`。只有整批导入清单提交成功后才能将项目标为 committed。批次失败时记录错误路径及原因，其余未导入项目不产生 Artifact 引用。
+
+```json
+{
+  "evidence_refs": [
+    {"type": "artifact", "uri": "artifacts://provided/<key>", "digest": "sha256:<digest>"}
+  ],
+  "evidence_files": ["pre-assess/input-check.json", "screenshots/login.png"]
+}
+```
+
+导入器只接受专用目录内的普通文件；调用结束并确认容器退出后冻结目录，再拒绝绝对路径、`.` / `..` 路径段、非规范相对路径、反斜线、任一层级的符号链接、硬链接、重复路径、目录及其它非普通文件。每次调用最多 100 个文件，单文件最多 10 MiB，合计最多 100 MiB。Adapter 先把全部文件暂存并验证摘要，再一次性发布导入清单；任一文件校验、读取或持久化失败时，整份结构化结果无效，不发布部分 Report 或 `evidence_refs`。未引用的暂存 Artifact 不作为运行证据，可在确认无引用后清理。
+
+Agent 可以省略 `evidence_files`，视为空列表。无效路径、超限、重复/未提供的引用或证据导入失败均使该调用无效。Worker 的 Pre-Assess、执行与 Post-Assess 故障进入 Workflow 错误 Gate；AI Gate 以 `GateReport.status: error` 交人类接管，不递归调用错误 Gate；Refinement 保留失败会话供人处理。Adapter 不猜测、改写或补造证据。Script Gate 继续直接返回已校验的类型化 `evidence_refs`，不使用文件导入协议。
+
 ## Pre-Assess
 
 每个 Attempt 先由 Adapter 使用固定 runner 发起独立只读调用与新原生会话。输入为 Context Snapshot、Requirement、选中 Node 上下文及已接受前驱证据；不挂载可写 Worktree、Git 凭据、Git 元数据或 Podman Socket。Adapter 必须在 `probe` 时确认原生结构化输出能力，不从自然语言推测字段。
@@ -199,7 +235,8 @@ conflicts: []                 # 各步冲突并集；每项含确定性 conflict
   "summary": "输入足以实现并验证锁定期限行为。",
   "missing_inputs": [],
   "risk_findings": [],
-  "evidence_refs": []
+  "evidence_refs": [],
+  "evidence_files": []
 }
 ~~~
 
@@ -208,11 +245,12 @@ conflicts: []                 # 各步冲突并集；每项含确定性 conflict
 | readiness | `ready` 或 `blocked` |
 | applicability | `ready` 时必填 `applicable` 或 `not_applicable`；`blocked` 时必须为 null |
 | summary | 非空说明 |
-| missing_inputs | `blocked` 时至少一项，`ready` 时为空；每项含说明和 evidence_refs |
+| missing_inputs | `blocked` 时至少一项，`ready` 时为空；每项含说明、可选的 Snapshot `source_refs` 和支撑说明的 evidence_refs |
 | risk_findings | 风险说明及 evidence_refs；只传入成果 Gate，不动态新增 Gate，不阻塞执行 |
-| evidence_refs | 支持结论的类型化证据引用；not_applicable 至少一项 |
+| evidence_refs | Agent 原始输出只能引用本次输入明确提供的类型化证据；规范化 Report 保存校验后的引用。not_applicable 至少一项 |
+| evidence_files | Agent 原始输出中的新证据相对路径列表，按本节协议导入；不进入 PreAssessReport |
 
-`ready + applicable` 才启动代码执行。`ready + not_applicable` 跳过代码执行并复用 input_commit，但仍执行必要检查、Post-Assess 和所有成果 Gate；若 input_merge 清单含未解决冲突，则不能据此跳过冲突处理，转错误 Gate。`blocked` 创建 ErrorRecord 并进入 Workflow 错误 Gate，不启动执行；Runtime 保留预检报告供恢复决策。结构无效、Applicability 不明确、矛盾字段或证据引用无效均作为预检故障进入错误 Gate。风险发现是固定成果审核输入的一部分，不临时扩充策略。
+`ready + applicable` 才启动代码执行。`ready + not_applicable` 跳过代码执行并复用 input_commit，但仍执行必要检查、Post-Assess 和所有成果 Gate；若 input_merge 清单含未解决冲突，则不能据此跳过冲突处理，转错误 Gate。有效 `blocked` 报告创建 stage=`pre_assess`、code=`pre_assess_blocked` 的 ErrorRecord，不启动执行；Runtime 保留报告供恢复决策。只有报告在 `missing_inputs[].source_refs` 明确列出 Snapshot 中的固定引用，且 Runtime 验证它当前仅因可恢复的外部可用性故障暂不可读时，才记录 `wait_condition` 并允许错误 Gate 选择 wait。需求内容本身不足、引用不存在、摘要不匹配、输出结构无效或 Applicability 不明确都不能 wait；需新输入时发布新定义并创建替代 Run。风险发现是固定成果审核输入的一部分，不临时扩充策略。
 
 PreAssessReport 保存在 `.facetloom/runs/<run-id>/reports/<report-id>.yaml`，`report_type: pre_assess`，内容不可变。报告包含 schema_version、report_id、run_id、combination_id、attempt_id、invocation_ref、readiness、applicability、summary、missing_inputs、risk_findings、evidence_refs、created_at。invocation_ref 是不含报告自身的不可变 Invocation 证据 Artifact。有效报告通过 Attempt.pre_assess_ref 引用；blocked 时 ErrorRecord.evidence_refs 引用报告。预检未形成有效报告时，ErrorRecord 引用可用的调用输入、原生输出与故障证据，不伪造报告。输入不足不伪造成 ExecutionResult 或 CheckReport。
 
@@ -245,6 +283,7 @@ created_at: "2026-11-09T12:00:00Z"
   "schema_version": 1,
   "summary": "实现锁定期限校验与剩余时间返回。",
   "evidence_refs": [],
+  "evidence_files": [],
   "conflict_resolutions": []
 }
 ~~~
@@ -253,7 +292,8 @@ created_at: "2026-11-09T12:00:00Z"
 | --- | --- |
 | schema_version | 必须为 1 |
 | summary | 非空简述 |
-| evidence_refs | 可核对的类型化执行证据引用 |
+| evidence_refs | Agent 原始输出只能引用本次输入明确提供的类型化证据；规范化 ExecutionResult 保存校验后的引用 |
+| evidence_files | Agent 原始输出中的新证据相对路径列表，按本节协议导入；不进入 ExecutionResult |
 | conflict_resolutions | 无输入冲突时为空；有冲突时必须逐项覆盖输入清单中的每个 conflict_id，记录 `resolved` 和 evidence_refs；resolved=false 时转错误 Gate |
 
 `ExecutionResult` 不声明是否适用或是否有代码变化。Runtime 比较最终输出与 input_commit 的 Git Tree，结合 PreAssessReport、Scope 和冲突清单决定 outcome：适用且有改动为 `changed`；适用且无改动为 `no_change`；预检不适用且无改动为 `not_applicable`。修复调用必须返回完整新 `ExecutionResult`；Runtime 只采用最终候选对应的结果，旧结果保留为 Invocation 历史。不适用 Attempt 不产生 ExecutionResult，其 Post-AssessReport 将 execution_result_ref 设为 null 并引用 PreAssessReport。
@@ -292,11 +332,12 @@ Post-Assess 由 Adapter 使用同一固定 runner 发起独立调用和新原生
   "status": "complete",
   "summary": "代码变更满足任务范围，检查报告覆盖最终 Tree。",
   "findings": [],
-  "evidence_refs": []
+  "evidence_refs": [],
+  "evidence_files": []
 }
 ~~~
 
-`status` 为 `complete` 或 `concerns`。`concerns` 必须带非空 findings；两种状态都须有非空 summary。报告按 Attempt 的 output_refs 固定为执行证据。`concerns` 不自动判失败，由成果 Gate 审核；只读调用试图改成果、退出失败、超时或返回无效结构均使 Post-Assess 失败，形成 ErrorRecord 并进入错误 Gate。不得重新运行自检来覆盖此前报告。
+`status` 为 `complete` 或 `concerns`。`concerns` 必须带非空 findings；两种状态都须有非空 summary。Agent 原始输出的 `evidence_refs` 只能引用本次输入明确提供的证据，`evidence_files` 按统一协议导入；规范化 Post-AssessReport 仅保存类型化 `evidence_refs`。报告按 Attempt 的 output_refs 固定为执行证据。`concerns` 不自动判失败，由成果 Gate 审核；只读调用试图改成果、退出失败、超时或返回无效结构均使 Post-Assess 失败，形成 ErrorRecord 并进入错误 Gate。不得重新运行自检来覆盖此前报告。
 
 Post-AssessReport 保存在 `.facetloom/runs/<run-id>/reports/<report-id>.yaml`，`report_type: post_assess`，内容不可变。必需字段为 schema_version、report_id、run_id、combination_id、attempt_id、evaluated_tree、pre_assess_ref、check_report_ref、execution_result_ref、invocation_ref、status、summary、findings、evidence_refs、created_at。invocation_ref 是不含报告自身的不可变调用证据 Artifact；execution_result_ref 在 not_applicable 时为 null，其它 outcome 必须引用有效结果。发布前校验报告 Tree 等于最终 Checkpoint Tree、输入引用均可读取且匹配摘要；报告自身作为 role=evidence 的 run_record 加入 Attempt.output_refs。
 

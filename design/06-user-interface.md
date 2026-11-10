@@ -47,6 +47,8 @@ flowchart LR
 
 执行详情显示预检结论、适用性、缺少的输入和风险证据，以及固定 runner、镜像 digest、实际 Adapter / Agent 版本、原生 session_id、调用记录及剩余总时限；未暴露的模型或工具信息显示“未知”。不适用的节点显示跳过代码执行，仍展示必要检查与 Gate。
 
+调用详情列出 Agent 提交的证据相对路径、导入状态、Artifact 摘要和可打开的持久引用。校验失败时显示失败路径与原因，明确标记整份调用结果未发布；不展示可供后续引用的部分导入结果。Gate AI 和 Refinement 的证据使用同一视图，Script Gate 只显示其返回且通过校验的类型化引用。
+
 汇聚节点列出未满足前驱、实际合并顺序、来源、共同祖先与冲突清单；preparing 显示输入尚未形成，blocked、stale 和 cancelled 显示原因。运行页分别显示「运行完成」「待交付」「已交付」。
 
 Gate 页面固定显示：
@@ -84,7 +86,7 @@ Workflow 错误 Gate：human / ai_assisted / ai / script
     └── 停止 → 取消 Run
 ~~~
 
-错误页以 ErrorRecord 为审核对象；未形成的输入、Snapshot 和输出显示“尚未形成”，不显示虚假 Diff。明确展示“处置动作”，不使用“批准成果”按钮。查看旧 Attempt 时保留 failed / rejected，不把恢复获准显示成 accepted。
+错误页以 ErrorRecord 为审核对象；未形成的输入、Snapshot 和输出显示“尚未形成”，不显示虚假 Diff。明确展示“处置动作”，不使用“批准成果”按钮。查看旧 Attempt 时保留 failed / rejected，不把恢复获准显示成 accepted。`wait` 仅在固定外部引用仍暂不可读时可选，显示被固定的引用与 Runtime 的可用性检查；引用恢复后禁用 wait，用户可请求按原 Gate 模式重新评估，并沿用原 Context Snapshot。需要新输入时显示创建新 Run 的入口；同一 Runtime 拥有的旧 Run 在新 Run 发布后取消，其它 clone 由旧 Run 所属 Runtime 在下次同步时取消。
 
 同时展示 `检查修复：已用 / max_check_retries` 与 `自动恢复：auto_recoveries_used / max_auto_recoveries`，前者属于 Attempt，后者属于整个 Run。每轮通过 CheckReport 显示 Tree、全部检查结果及证据；error / not_run 与 failed 分开显示，代码变化后旧通过结果标为历史，不能代表新 Tree。
 
