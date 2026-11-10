@@ -1,6 +1,6 @@
 # Services
 
-服务实现 [Requirement](02-requirement.md)、[Governance](03-governance.md) 和 [Execution](04-execution.md) 的协议。本地执行状态、本地 main 已生效档案与 Git 同步状态分别管理。
+服务实现 [Requirement](02-requirement.md)、[Governance](03-governance.md) 和 [Execution](04-execution.md) 的协议。本地执行状态、main 已采纳档案与 Git 同步状态分别管理。
 
 ## 组件关系
 
@@ -33,9 +33,9 @@ flowchart LR
 | --- | --- |
 | 固定 DAG、CombinationRun | 调度 pending 且所有直接前驱 satisfied 的节点 |
 | 本地 Attempt、Worker 与容器 | 对账、恢复；无法恢复则 failed 并创建 ErrorRecord，不重复启动 |
-| main 当前需求指针与 `replaces_run_id` | 同步后取消被新版取代的未终态 Run；跨 clone 仅在下次同步时可见 |
-| Gate 报告与决策 | 成果全部批准发布后接受；拒绝转错误 Gate；错误动作串行校验额度与依赖，发布后执行 |
-| 关键运行事件 | 整理结果与证据，进入待发布队列 |
+| main 正式输入、采纳历史与 replaces_run_id | 检测基线变化、阻止重复采纳；显式替代仅停止同 Runtime 的本地 Run |
+| Gate 报告与决策 | 成果全部批准后以本地事务接受；拒绝转错误 Gate；恢复动作与额度同事务落地后执行 |
+| 运行完成与采纳 | 本地整理结果和证据；仅最终采纳向 main 提交需求、代码与精简档案 |
 
 创建 Attempt、变更状态、接收取消和准备交付，先在本地原子持久化。每个 clone 独立限制并发；同一 Run 由创建它的 Runtime 写入。其它 clone 只读同步，或经拥有者受信接口提交人类操作；首阶段不实现活动运行接管和远程实时状态共享。
 
@@ -44,7 +44,8 @@ Runtime 首次使用 clone 时生成 UUIDv4，保存为 `.runtime/identity.yaml`
 ```text
 .facetloom/.runtime/
 ├── identity.yaml             # schema_version: 1、runtime_id；不进入 Git
-├── runs/<run-id>/             # 完整状态、不可变快照和待发布操作
+├── requirements/<uuid>/      # requirement.md、frozen.yaml；冻结绑定不可变
+├── runs/<run-id>/             # 完整状态、不可变快照与交付意图
 ├── transactions/<operation-id>/ # manifest、payloads、COMMITTED、APPLIED
 ├── worktrees/<attempt-id>/    # detached Worktree
 ├── workers/<attempt-id>.yaml  # Worker 身份、停止意图及调用引用
@@ -57,11 +58,11 @@ Runtime 首次使用 clone 时生成 UUIDv4，保存为 `.runtime/identity.yaml`
 └── runtime.sqlite            # 可选索引或缓存
 ```
 
-本地文件是未发布运行的恢复依据，SQLite 不是必需依赖。丢失本地状态后，Git 只恢复已发布档案，Artifact 字节须从保留库或交换包恢复；不能声称可重建未发布操作或继续原 Worker。回收 Worktree、Worker 或临时日志时不清空 Artifact 库，备份和迁移须将其作为持久数据。
+本地文件是未采纳运行的恢复依据，SQLite 不是必需依赖。丢失本地状态后，Git 只恢复已采纳档案，Artifact 字节须从保留库或交换包恢复；不能声称可重建丢失的本地操作或继续原 Worker。回收 Worktree、Worker 或临时日志时不清空 Artifact 库，备份和迁移须将其作为持久数据。
 
 ## 本地文件事务
 
-文件是未发布状态的事实来源；SQLite 可以从文件重建。事务覆盖 Run、CombinationRun、Attempt、Worker、Invocation、评估任务标记、恢复额度及待发布意图，避免逐个 YAML 写入造成半更新。
+文件是本地执行状态的事实来源；SQLite 可以从文件重建。事务覆盖 Requirement 冻结绑定、Run、CombinationRun、Attempt、Worker、Invocation、评估任务标记、恢复额度及外部动作意图，避免逐个 YAML 写入造成半更新。
 
 ```text
 transactions/<operation-id>/
@@ -83,20 +84,16 @@ writes:
     after_digest: sha256:<new>
     payload: payloads/0
 side_effects:
-  - id: <stable-effect-id>
-    kind: publish_records
-    publication_kind: advance
-    depends_on: []
   - id: <stable-worker-id>
     kind: start_worker
-    depends_on: [<stable-effect-id>]
+    depends_on: []                     # 决定、额度和新 Attempt 已在本事务落地
 ~~~
 
 路径相对 `.runtime/`，禁止越界。新增文件的 before_digest 为 null；删除文件的 after_digest 与 payload 为 null。载荷摘要必须匹配 manifest；side_effects 固定调用对象、输入摘要、参数引用和依赖，实际内容随操作载荷保存。凭据不写入事务。operation_id 用于请求去重；sequence 在同一 aggregate 内递增。
 
 ### 提交协议
 
-1. 获取该 Run 的进程级排他文件锁，检查 operation_id、预期摘要、sequence 与运行有效性。同一 Run 的状态、任务和额度变更共用此锁；Refinement 使用会话锁。
+1. 获取该 Run 的进程级排他文件锁，检查 operation_id、预期摘要、sequence 与运行有效性。同一 Run 的状态、任务和额度变更共用此锁；Refinement 使用会话锁。首次冻结使用 Requirement 锁及 `aggregate: {kind: requirement, id: <requirement-id>}`，释放后再获取 Run 锁。
 2. 写入完整 payloads 与 manifest，逐个 fsync 文件和目录。此时不改目标文件，不执行外部动作。
 3. COMMITTED 内容包含 manifest 的 SHA-256，通过临时文件与 rename 发布，再 fsync 文件及事务目录；事务目录首次创建也须 fsync transactions 父目录。此刻事务已提交，之后必须完成重放，不能回滚成未发生。
 4. 对每个目标使用同文件系统临时文件、fsync、原子 rename 和目录 fsync 完成替换。删除操作使用 unlink 并 fsync 父目录。当前摘要已是 after_digest 则跳过；等于 before_digest 才写入；两者均不符则隔离该 Run 并报恢复错误，不能覆盖未知更新。
@@ -116,24 +113,24 @@ side_effects:
     ↓
 验证状态与引用 → 对账 main / Artifact / Worker / 评估调用
     ↓
-恢复待发布队列 → 恢复有效评估与执行调度
+恢复交付及其它外部意图 → 恢复有效评估与执行调度
 ```
 
 - 同一 aggregate 的后续事务只能在前一事务 APPLIED 后创建，故恢复时不存在合法的越序覆盖。恢复完毕前不启动新 Worker。
 - 启动 Worker、评估请求、Artifact 导入/导出/清理及 Git 提交都先持久化意图。容器按稳定 worker ID 查询；调用按 report ID / 请求摘要对账；Artifact 按内容摘要及本地操作回执校验；Git 按本地 main 的操作 Trailer 与目标内容校验。
 - 本地 main 更新结果未知时先在历史中查找操作 ID。即使 Refinement 已清理当前档案，也不能重新追加已执行操作或复活旧记录。push 确认丢失只需核对远端是否已含原提交，不重放业务操作。
-- 外部动作状态为 pending / running / succeeded / failed / unknown / cancelled，确认失败记录原因并等待重试或人工处理；状态变化也通过文件事务保存。恢复动作的扣减、状态和 outbox 同事务提交，重放不重复扣减；取消后不返还已安排额度。
-- 错误恢复 Worker 依赖相应决定成功发布；同一 Run 的发布队列按 sequence 串行推进；成果接受及交付也等待对应 main 提交确认。普通 Worker 的启动不要求每个内部状态都提交 Git。
+- 外部动作状态为 pending / running / succeeded / failed / unknown / cancelled，确认失败记录原因并等待重试或人工处理；状态变化也通过文件事务保存。恢复动作的扣减、状态和动作意图同事务提交，重放不重复扣减；取消后不返还已安排额度。
+- 错误恢复 Worker 依赖相应决定和额度事务 APPLIED；成果接受同样在本地落地后生效。只有最终采纳及独立 Refinement 等 Git 写入等待 main 确认，普通执行与 Gate 不提交 Git。
 - 无幂等接口且发送结果未知时，先保留 unknown 并对账；无法确认则等待人类，不自动重发，不保证网络调用恰好执行一次。
-- APPLIED 事务仅在所有必要动作已对账并完成后才可回收；保留本地操作 ID 去重索引。发布结果仍以本地 Git 历史 Trailer 校验，不以可选 SQLite 为唯一依据，也不等待远端同步。
+- APPLIED 事务仅在所有必要动作已对账并完成后才可回收；保留本地操作 ID 去重索引。Git 写入结果仍以本地 Git 历史 Trailer 校验，不以可选 SQLite 为唯一依据，也不等待远端同步。
 
 ## Gate 评估协调
 
 这是 Runtime 内的一项职责，不另设持久 GateRun：
 
 1. 启动 Run 时校验成果及错误策略、检查、评估器与引用；错误策略固定在 run.yaml，成果策略在准备成功后固定到 Context Snapshot。能力不足按执行错误或评估器故障分别处理。
-2. 成果材料完整后冻结并发布 Attempt.waiting_gate；节点出错或成果拒绝后发布 ErrorRecord 及 CombinationRun.waiting_gate。发布成功才发起对应成果项或 workflow/error 的正式评估；四种模式共用调用基础设施。
-3. 调用前保存 report_id、review_input_digest、实际初始评估请求、前一决策 ID 和本地任务状态。发布报告前持久化 request_input_ref，只有请求尚未形成即失败时可为空。任务身份包含 review_kind；错误任务还绑定 error_ref，同一审核对象同时最多一个活动评估。不同项可并行，限制沿用 clone 的并发配置。
+2. 成果材料完整后本地冻结 Attempt.waiting_gate；节点出错或成果拒绝后持久化 ErrorRecord 及 CombinationRun.waiting_gate。本地事务落地后才发起对应成果项或 workflow/error 的正式评估；四种模式共用调用基础设施。
+3. 调用前保存 report_id、review_input_digest、实际初始评估请求、前一决策 ID 和本地任务状态。保存报告前持久化 request_input_ref，只有请求尚未形成即失败时可为空。任务身份包含 review_kind；错误任务还绑定 error_ref，同一审核对象同时最多一个活动评估。不同项可并行，限制沿用 clone 的并发配置。
 4. 按 review_kind 验证结果或处置动作。成果报告引用更新 Attempt，错误报告引用更新 CombinationRun；AI/脚本恢复动作同时校验 Run 级额度和失效范围。评估器自身故障交给人类，不递归调用错误 Gate。
 5. 接管、取消、成果拒绝或输入失效时，先持久化撤销相关任务，再停止进程。成果拒绝只撤销原成果评估，另发起错误审核。重启按 report_id 对账；迟到或已失效任务不能推进状态。
 
@@ -145,118 +142,69 @@ Git Manager 是唯一执行受信 Git 写入的组件；管理 main、隔离 Wor
 
 | 操作 | 校验 |
 | --- | --- |
-| 创建运行 | source_commit、当前需求、定义、DAG 与 Run ID 唯一性 |
-| 保存 Checkpoint | Attempt、输入、分组写入 Scope、outcome 与 Tree 一致性、取消或失效状态 |
-| 保存 CheckReport | Snapshot 检查清单、真实执行记录、修复次数与最终 Tree，禁止 Worker 自报通过替代结果 |
-| 导入 Agent 证据 | 引用属于调用输入白名单；路径、文件类型、数量、单项/合计大小、摘要与 Artifact 持久性全部通过后才发布规范化结果 |
-| 发布档案 | owner_runtime_id、预期记录摘要、ID、引用和发布方本地持久证据 |
-| 发布成果 waiting_gate | 最终 Tree 的全部检查有结果、agent_input_ref 与执行证据在发布方本地持久可读、固定字段与 review_input_digest 一致 |
-| 发布错误 waiting_gate | failed / rejected Attempt、ErrorRecord 与可用证据已保存，错误策略有效；不要求成果字段 |
-| 保存成果 Gate | review_kind=result、固定材料摘要、策略、主体、报告/接管依据、Attempt 摘要、前一决策和 evaluated_tree |
-| 保存错误 Gate | review_kind=error、active_error_ref、错误策略及摘要、CombinationRun 摘要、前一决定、Run 计数、修复范围与动作 ID |
-| 发布定义 | 人类审阅、Requirement 新版规则、定义和 DAG 校验 |
-| 集成交付 | current、project_tree、有效终端输出、可恢复候选、通过的 Report、绑定确认、已有交付与活动 delivery_id |
-| Refinement 提交 | 来源与目标摘要、确认 Diff、验证结果、清理引用完整性 |
+| 准备运行与 Checkpoint | source_commit、UUID、DAG、Scope、outcome、输入/输出 Tree 与取消状态 |
+| 固定审核材料 | 最终 Tree 的实际检查、请求与执行证据本地持久可读，冻结字段和 review_input_digest 一致 |
+| 保存 Gate | Runtime 以本地事务校验主体、材料、策略、前一决定、状态与额度；Git Manager 不将其逐次提交 main |
+| 导入 Agent 证据 | 输入白名单、文件路径与类型、数量/大小上限、摘要及持久性 |
+| 最终采纳 | 需求未采纳、基线有效、终端成果、报告与确认匹配；需求、代码、档案及回执一次提交 |
+| 定义 / Refinement 维护 | 人类确认 Diff、定义和 DAG 校验、证据与清理引用完整性 |
 
-### 本地提交生效
-
-本文的“发布”统一指：校验通过的提交进入本地 `main`。需求、Gate、交付与精炼均以此为生效边界；有无 Git remote 使用相同规则，不增加项目模式或 WorkflowRun 发布目标字段。remote 只负责异步交换历史，连接失败不撤销本地结果，也不阻塞已满足本地条件的运行。
+### 本地执行与最终采纳
 
 ```text
-本地事务 → 校验并提交本地 main → 业务操作生效
-                                  ↓ 可选、显式同步
-                           push / fetch + 合并
+执行 / Gate / 恢复决定 → 本地事务 COMMITTED → APPLIED → 生效与继续调度
+                                                           ↓ 最终检查、人类确认
+                                    需求 + 代码 + 精简档案 + DeliveryRecord
+                                                           ↓ 一次 squash
+                                                       本地 main
+                                                           ↓ 可选、显式 Git 同步
+                                                       其它 clone
 ```
 
-1. 在独立 detached 发布 Worktree 中，以本地 main 的预期头构造仅含本次操作的候选提交，不混入用户未提交修改，不创建发布分支。提交带 `FacetLoom-Operation: <operation-id>` Trailer；重构尚未生效的候选时保留操作 ID。
-2. 在仓库发布锁下重新读取 main、预期文件摘要及业务条件，确认候选仍可生效。头已变化时先查操作是否完成；未完成则重新校验并构造，不覆盖新提交。
-3. main 未在任何 Worktree 检出时，以预期旧 OID 做比较并更新引用；main 已检出时，仅在该 Worktree 的工作区、索引干净且无将被覆盖的未跟踪文件时，正常快进并同步文件。不能仅移动引用而留下旧索引或文件；不切换其它分支，不自动 stash、reset 或覆盖用户修改。条件不满足时保留待发布操作，等待用户处理。
-4. main 已包含候选后记录结果并推进状态。引用或工作目录更新中断时，先按实际 main、Git 索引与操作 Trailer 对账；不能确认完整落地则暂停新发布，修复前不覆盖未知用户修改。候选 Commit 仅存在本地对象库而未进入 main 时不算成功。
+一个 Requirement 对应一次采纳提交；运行过程中不写 main。失败、取消和放弃的记录留在本地，可显式导出。定义维护及 Refinement 是各自独立的人类确认操作，不是原需求的追加日志提交。remote 只同步历史，无需 remote 即可完成全部本地操作。
 
-上述锁串行化 FacetLoom 的本地写入；同时使用 Git 自身的引用和索引锁、预期头校验及正常文件更新保护，拒绝并发 Git 操作导致的未知变化。启动和发布不强制 fetch；全部有效性检查依据当前 clone 已知的 main。
+### main 提交保护
 
-### 发布分类与取消竞争
+以下协议仅用于最终采纳、定义维护和 Refinement：
 
-本地发布操作通过 publication_kind 区分归档、生效与交付。
+1. 先保存本地操作意图。在 detached Worktree 中基于最新 main 构造候选，以当前头为唯一父提交；不混入用户修改，不创建命名执行分支。候选带 `FacetLoom-Operation` Trailer，采纳再带 Requirement、Run、Delivery 标识。
+2. 最终采纳持有 Run 锁后再取仓库写入锁，重查操作、需求采纳历史、确认及基线。预期头变化时先查是否已成功；未成功且只有 runs/ 变化可保留最新档案重构，正式输入变化要求新 Run，不把多个需求的成果自动合并。
+3. main 未检出时以预期旧 OID 比较更新引用；已检出时，只有工作区和索引干净、无将被覆盖的未跟踪文件才正常快进并同步文件。不切换其它分支，不自动 stash、reset 或覆盖用户修改。
+4. 提交进入 main 的可达历史才成功，候选仅存在对象库不算成功。结果未知时先核对 main、Git 索引和 Trailer，校验需求字节、候选 Tree、档案闭包和同 Commit 回执，再完成本地确认。无法判断工作目录是否完整落地时暂停新 Git 写入，人工处理后恢复。
 
-| publication_kind | 内容 | 校验 |
-| --- | --- | --- |
-| archive | 错误、取消、历史证据与已发生事实 | 可归档旧需求；不能接受成果、恢复执行或改正式代码 |
-| advance | 初始运行发布、正式审核请求、成果接受、恢复决定与执行解锁 | 必须仍为本地 main 的当前需求、当前有效 Run / Attempt / 错误；重新读取 main 后若发现替代关系或正式输入已变，则拒绝旧 Run 继续推进 |
-| delivery | 正式代码交付或 no_change 成功回执 | 需求、基线、固定报告、确认及唯一交付全部有效 |
+锁串行化当前 clone 的受信写入，同时使用 Git 引用/索引锁与预期头校验。仅 main 工作目录脏不会阻塞本地执行或 Gate，但会阻塞采纳。重复请求按 operation_id、delivery_id、run_id 和 requirement_id 对账；档案已被精炼删除也查历史，不能重新采纳或复活记录。
 
-既有报告/决定可作为历史证据归档，但不能因归档而变成有效批准。未完成报告仍须满足引用可读和摘要规则。生效发布先保存在本地 outbox，进入本地 main 前不提前变成 accepted / satisfied，也不解锁后继；本地已生效之后可独立显示尚未同步，不继续占用业务 outbox 等待 push。
+### 取消与并发
 
-取消或上游失效时，先在 Run 事务中封禁该执行身份、保存停止及撤销意图。尚未提交本地 main 的旧 advance 操作标为 cancelled，必要事实纳入新的 archive 操作；不能把旧状态补丁原样重放。取消档案可跳过已撤销的旧操作，不被旧推进队列永久阻塞。已消耗自动恢复额度不返还。
+本地成果接受、恢复和取消共用 Run 锁及文件事务，按实际提交顺序确定结果。取消先封禁执行身份、持久化停止与撤销意图；迟到报告不推进状态。accepted / rejected 等既有终态保留，节点失效则清除当前有效引用。取消不向 main 追加日志。
 
-```mermaid
-sequenceDiagram
-    participant RT as Runtime
-    participant GM as Git Manager
-    participant Main as 本地 main
-    RT->>RT: 保存取消/失效意图，禁止新执行和迟到结果生效
-    RT->>GM: 撤销未提交操作；查询在途 main 更新
-    GM->>Main: 读取头，按操作 Trailer 对账
-    alt 旧推进尚未进入 main
-        GM-->>RT: 放弃旧推进
-        RT->>RT: 活动 Attempt cancelled
-    else 旧推进已经成功
-        GM-->>RT: 确认已发布历史事实
-        RT->>RT: 记录原终态；节点按取消/失效状态停止推进
-    else 无法确认
-        GM-->>RT: unknown，保留在途操作
-    end
-    RT->>GM: 按当前状态归档取消及证据，不恢复旧执行
-```
+最终采纳也持有 Run 锁；未进入 publishing 时可取消意图，publishing 或 main 结果未知时须先对账。采纳已进入 main 则保留成功事实，不再取消或重放；撤回正式成果使用 Git revert。completed Run 的未交付成果可由人类明确放弃，规则见 Execution。
 
-涉及在途终态发布的 Attempt 先记录本地停止意图，待对账后确定历史终态；界面显示“已请求停止，发布结果待对账”。已经发布的 accepted / rejected 等终态不回写为 cancelled；已取消 Run 即使对账到先前成功的批准，也不能启动后继。Run cancelled 表示调度已停止，不承诺所有外部进程均已退出。
-
-本地提交生效后又发现取消或需求取代时，在当前 main 追加事实，不改写已生效历史。取代关系被本 clone 获知前已成功的交付照实保留回执，但不代表成果仍适用于当前需求；尚未生效的旧交付不得重试为有效成果。交付结果未知时仍遵循 Execution 的 publishing 对账规则。
-
-### main 并发写入
-
-```text
-A、B 是同一 clone 内的两个操作，基于同一个 main 头
-    ↓
-A 更新 main 成功；B 的预期头校验失败
-    ↓
-B 重新读取本地 main，检查自己的预期输入与操作 ID
-    ↓
-无冲突 → 在最新头重新构造尚未生效的提交
-状态或内容已变 → 阻塞原操作，重新审核
-```
-
-- 不同 Run 的目录可以自动重新追加；不得用整个旧 Tree 覆盖 main。
-- 同一 Run 先串行化本地写入，按预期文件摘要和操作 ID 去重。交付还按 run_id 去重，不同操作 ID 也不能重复交付同一运行。Gate 按 gate_id 校验前一决策；其他 Gate 的更新可在复核固定材料后合并，冲突不采用最后写入者覆盖。
-- 已发布后重试先核对操作是否存在，避免重复决策、交付或复活已清理档案。
-- main 新增或清理 `.facetloom/runs/` 不改变正式输入；其余路径变化按 Execution 的基线规则处理。
-- 本地提交暂不可用时保留待发布操作；远端同步暂不可用只标记同步未完成，不阻止本地提交、Gate 或交付。
+不同需求可并行执行；main 采纳串行进行。先采纳的需求改变正式输入后，其它旧基线 Run 需在新 source_commit 下重跑，即使文本可自动合并也不复用旧候选检查。仅 runs/ 的精炼清理不改变执行输入。Run 目录有不同 UUID 只解决文件命名，不证明代码或定义兼容。
 
 ### Git 异步同步
 
-不区分本地与远程项目。未配置 remote 时无需同步；配置后由用户显式执行 Git 同步，FacetLoom 不新增自动同步服务。各 clone 可以暂时持有不同的需求版本和成果，只能根据已知历史判断有效性。
+不区分本地与远程项目。未配置 remote 时无需同步；配置后由用户执行正常 Git 操作，FacetLoom 不增加自动同步服务，也不要求每次执行前 fetch。
 
 | 情况 | 处理 |
 | --- | --- |
-| push 成功 | 其它协作者可获取这些提交；不重新执行其中的操作 |
-| 网络失败、push 被拒或确认丢失 | 保留本地已生效结果；核对远端包含关系，必要时先获取更新，不重复交付或生成替代业务提交 |
-| 接收更新可快进 | 校验收到的定义和档案，再按本地 main 工作目录保护规则快进 |
-| 历史分叉 | 在隔离 detached Worktree 构造保留双方提交的 merge 候选，验证后再更新 main；不自动 rebase、强推或改写固定 OID |
-| 文本冲突或业务约束冲突 | 阻塞该合并，人工解决后重验；Git 能自动合并不代表业务规则有效 |
+| push 成功 | 共享已采纳提交和维护提交；不重放其中的 Gate 或交付 |
+| 网络失败、push 被拒或确认丢失 | 保留本地结果，核对远端包含关系后再同步；不重复采纳 |
+| 接收更新可快进 | 校验定义、UUID、档案和引用，按 main 工作目录保护规则更新 |
+| 历史分叉或代码冲突 | 停止自动接纳，由用户按 Git 协作流程协调；不提供需求版本合并、自动重放或强推流程 |
+| 同一需求 UUID 出现多次采纳或不一致内容 | 报告冲突，由人类处理；文本可合并不能视为业务合法 |
 
-合并验证覆盖定义、DAG、不可变记录及引用摘要、Run 拥有者、当前需求和替代关系；接收缺少 Artifact 字节的记录是允许的，不要求导入全部证据。历史操作按其原提交上下文验证，不能因当前需求已变而丢弃过去已生效的决定或交付；它们也不因此成为当前可复用的批准。
+Git 同步不要求同时导入所有 Artifact；可先读摘要，所需原始内容另用交换包补齐。同步采用保留固定 Commit 引用的历史；外部重写导致引用不可恢复时须人工修复，不静默换 OID。
 
-不同 Run 的独立档案可共存；同一对象不兼容的更新、同名不同内容的需求版本、并发竞争的替代 Run，即使文本不冲突也不得静默选取。人工在保留双方历史的前提下协调需求、取消竞争运行等，再形成有效合并；不修改历史 Attempt 的冻结字段或伪造另一 Runtime 的状态。
+接纳更新后，在调度、接收决定与交付前重新检查 main 的正式输入及需求采纳历史：基线变化阻塞旧 Run 并要求新 Run，同一需求已采纳则停止本地其它运行。fetch 仅获取对象，未进入本地 main 的更新不成为执行输入。其它独立需求不会因名称或时间关系而自动取代本地需求，也没有跨 clone 运行取消服务。
 
-接收更新并进入本地 main 后，Runtime 在恢复调度、处理审核结果或交付前重新检查 current、替代关系与正式输入。自己的旧版或被替代未终态 Run 按已有协议停止、取消；正式输入发生变化则阻止旧 Run 继续推进或交付，要求新 Run。其它 clone 的 Run 不由本 Runtime 接管，已有决策和交付保留为历史事实。合并后代码不自动继承原候选的检查结论，需要验证合并结果时创建新 Run。
-
-fetch 本身只获取对象，未接纳到本地 main 的远端内容不成为执行输入。通过普通 Git 在服务外更新 main 时，Runtime 同样先检测头变化并校验；发现冲突、无效定义或记录时暂停相关推进，直到人工修复。同步不撤销其它 clone 已经发生的事实，也不提供全局即时取消或唯一性锁。
+通过普通 Git 在服务外更新 main 时执行同样校验；无效定义、重复 UUID 或破损档案暂停相关操作。历史采纳和 Gate 保留原上下文，不证明同步后代码已经通过旧检查，也不承诺离线 clone 间即时唯一或即时停止。
 
 ### 本地代码与持久证据
 
-根输入来自 source_commit，汇聚输入来自最终约简 DAG 快照的直接前驱当前有效输出，按 Execution 的稳定逐步三方合并协议构造。活动 Worktree 锚定需要的本地 Commit；关闭前保证有后继 Worktree 或已验证的持久 Git bundle。记录发布前将所需 Artifact 保存到发布方本地库，验证 Git bundle 在空仓库中可恢复输入与输出。不用额外命名分支维持快照，也不要求上传到共享服务。
+根输入来自 source_commit，汇聚输入来自最终约简 DAG 快照的直接前驱当前有效输出，按 Execution 的稳定逐步三方合并协议构造。活动 Worktree 锚定需要的本地 Commit；关闭前保证有后继 Worktree 或已验证的持久 Git bundle。记录持久化前将所需 Artifact 保存到拥有者本地库，验证 Git bundle 在空仓库中可恢复输入与输出。不用额外命名分支维持快照，也不要求上传到共享服务。
 
-正式成果交付时，保留最新 main 档案，在其上应用已接受代码变更并校验 project_tree；候选及最终检查报告先持久化，再获取绑定候选的人类确认。运行完成和交付分别记录：applied 在集成后追加回执；no_change 不创建空代码 Commit，直接发布回执。
+最终交付时，在最新 main 上应用成果并加入冻结需求文件，保留既有档案；候选及最终检查报告先本地持久化，再获取绑定候选的人类确认。applied / no_change 均在同一个 squash Commit 中写入需求、精简档案和 DeliveryRecord，不追加回执提交。
 
 本地 `.runtime/runs/<run-id>/delivery.yaml` 保存活动交付意图和确认。调度、取消及交付共用 Run 锁；准备 main 提交时再获取仓库发布锁。本地预期头变化必须重验；publishing 表示正在提交本地 main，结果未知时先查 Trailer，不创建第二个 delivery_id。后续 push 不参与交付状态。协议与字段见 Execution。
 
@@ -268,10 +216,10 @@ fetch 本身只获取对象，未接纳到本地 main 的远端内容不成为�
 | --- | --- |
 | 保存 / 读取 | 校验字节摘要，原子登记文件及直接依赖；解析内容 URI 为当前 clone 的受控文件 |
 | 检查可用性 | 区分本地可用、尚未导入、已在本地清理及缺失/损坏；缺内容不改运行事实 |
-| 导出 / 导入 | 按固定 Git 记录收集闭合依赖，校验独立交换包，整包提交；不操作正式代码或活动 Run |
+| 导出 / 导入 | 按固定 Git 记录或本地记录快照收集闭合依赖，校验独立交换包，整包提交；不操作正式代码或活动 Run |
 | 预览 / purge | 检查全部本地使用者及本地 main 的保留引用，人工确认后记录回执并删除；无需联网 |
 
-协议和文件结构统一见 [Execution](04-execution.md#artifact-存储与交换)。存储写入、引用登记与保护标记使用同一 clone 级库锁；本地运行、待发布操作、精炼和交换操作在使用前登记保护，结束后释放。登记与有效状态通过文件事务一起提交，恢复时先重放并重建保护集合，再允许 purge。
+协议和文件结构统一见 [Execution](04-execution.md#artifact-存储与交换)。存储写入、引用登记与保护标记使用同一 clone 级库锁；本地运行、交付意图、精炼和交换操作在使用前登记保护，结束后释放。登记与有效状态通过文件事务一起提交，恢复时先重放并重建保护集合，再允许 purge。
 
 需要多类锁时，顺序为 Run 或 Refinement 会话锁 → Artifact 库锁 → 仓库发布锁，不同时获取多个 Run 锁。purge 在库锁下读取已提交的引用/保护视图，不反向获取 Run 锁；发现变化或无法核对完整依赖则中止并重新预览。耗时打包与 Git 同步在锁外进行，使用期间持久保护所需对象。删除意图提交后，相关对象不可新增引用或开始导出，直到删除完成；再次导入须先完成或对账该清理操作。
 
@@ -350,11 +298,11 @@ Invocation 文件使用以下字段；Adapter 把独立目录以 `/facetloom/evi
 
 续接只能引用同一 Attempt 的 execute / repair 调用、相同固定 runner 的原生会话；Post-Assess 不得复用可写执行容器或会话。恢复时重新核实镜像、程序版本及 Adapter 兼容性，不能静默切换运行方式。
 
-runner.timeout_seconds 从首次 Pre-Assess 调用发出前持久化 started_at / deadline_at 开始计时，覆盖预检、执行、同次修复、检查和只读 Post-Assess；排队、输入准备、Gate 等待和档案发布不计入。Runtime 重启不重置 deadline。达到总时限为 execution_timeout，停止当前调用或检查并保存实际结果，Attempt failed 后转错误 Gate；单个检查自身先超时仍按 CheckReport 的 failed 处理。每次 Agent 调用还受同一 runner.timeout_seconds 单次限制。AI Gate 评估与 Refinement 不属于 Attempt，采用各自调用的时限。
+runner.timeout_seconds 从首次 Pre-Assess 调用发出前持久化 started_at / deadline_at 开始计时，覆盖预检、执行、同次修复、检查和只读 Post-Assess；排队、输入准备、Gate 等待和最终采纳不计入。Runtime 重启不重置 deadline。达到总时限为 execution_timeout，停止当前调用或检查并保存实际结果，Attempt failed 后转错误 Gate；单个检查自身先超时仍按 CheckReport 的 failed 处理。每次 Agent 调用还受同一 runner.timeout_seconds 单次限制。AI Gate 评估与 Refinement 不属于 Attempt，采用各自调用的时限。
 
 ### 停止与恢复
 
-1. 在本地事务保存 stop_requested、停止原因和原任务撤销标记，立即禁止其迟到结果推进状态；取消、需求取代、上游修复及执行超时使用同一协议。
+1. 在本地事务保存 stop_requested、停止原因和原任务撤销标记，立即禁止其迟到结果推进状态；取消、同一需求已采纳、上游修复及执行超时使用同一协议。
 2. 请求原生调用正常退出，停止 Worker 容器；默认宽限期 30 秒，实际值及停止截止时间随意图持久化，超时强制终止。
 3. 确认进程及容器退出后记 stopped，再回收 Worktree、会话与资源额度。查询失败记 unknown，不当作已退出，也不重复启动。
 4. 无法停止则保留资源引用，隔离旧任务并转人工对账。隔离须确认旧任务无法再访问新 Worktree 或受信写入接口；仅写一个“已隔离”标记不够。

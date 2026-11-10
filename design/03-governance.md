@@ -2,20 +2,22 @@
 
 成果 Gate 按 Node 要求审核 Combination 输出；错误 Gate 决定执行失败或成果拒绝后的处理动作。Refinement 将运行经验转化为改进。正式定义发布、最终代码交付和精炼采纳由人类确认。
 
+运行对象先保存在 `.facetloom/.runtime/runs/<run-id>/`，本地事务落地即生效；仅最终采纳时选取必要记录及依赖闭包加入 main。下文路径以采纳档案表示，执行期间使用相同相对布局。
+
 ## 对象与职责
 
 | 对象或机制 | 内容 | 保存位置 |
 | --- | --- | --- |
 | GatePolicy | 模式、上下文和评估器配置 | 成果策略固定在 Context Snapshot；错误策略固定在 run.yaml |
-| ErrorRecord | 不可变错误材料及相关输入、前驱和证据 | main 的运行档案 errors/ |
-| PreAssessReport / CheckReport / Post-AssessReport | 预检、Runtime 实际检查与只读自检证据；均不作 Gate 决策 | main 的运行档案 reports/ |
-| GateReport | AI 建议、自动评估结果或故障证据 | main 的运行档案 reports/；大日志使用 Artifact 引用 |
-| GateDecision | 某项成果审核或错误处置决定 | main 的运行档案 decisions/ |
+| ErrorRecord | 不可变错误材料及相关输入、前驱和证据 | 本地 errors/；采纳时归档 |
+| PreAssessReport / CheckReport / Post-AssessReport | 预检、Runtime 实际检查与只读自检证据；均不作 Gate 决策 | 本地 reports/；采纳时归档 |
+| GateReport | AI 建议、自动评估结果或故障证据 | 本地 reports/；采纳时归档；大日志使用 Artifact 引用 |
+| GateDecision | 某项成果审核或错误处置决定 | 本地 decisions/；采纳时归档 |
 | Refinement | 人机筛选记录、落实改进的会话 | 本地 `.runtime/refinements/` |
 | 改进 Commit | 已落实改动、验证结论、证据来源及清理范围 | main 的 Git 历史 |
 | 执行边界 | 固定 runner、文件与网络隔离、资源和凭据限制 | Git 定义及 Run 快照；本地 Runtime 实施隔离 |
 
-普通定义修改由人类审阅 Diff 后提交本地 main 即生效；Requirement 内容变化须发布新版本并更新 current.yaml。Refinement 是根据运行记录主动改进的入口。main 写入由受信 Git Manager 管理，远端同步遵守相应凭据与分支保护；是否推送不改变本地生效边界。
+普通定义修改由人类审阅 Diff 后提交本地 main 即生效；Requirement 首次运行前本地冻结，冻结后内容变化创建新 UUID 的需求，采纳时与成果一起提交。Refinement 是根据运行记录主动改进的入口。main 写入由受信 Git Manager 管理，远端同步遵守相应凭据与分支保护；是否推送不改变本地生效边界。
 
 ## Gate 模式与职责
 
@@ -36,7 +38,7 @@ flowchart LR
     H --> ALL{全部 Approved}
     AI --> ALL
     S --> ALL
-    ALL --> P[发布决策与状态]
+    ALL --> P[本地事务保存决策与状态]
     P --> N[满足后继依赖]
 ```
 
@@ -73,7 +75,7 @@ AI 评估的时限取 evaluator.timeout_seconds 与 runner.timeout_seconds 的�
 Worker               → 生成代码与自检证据
 AI / 脚本评估器       → 审核固定成果，返回报告
 人类                 → 人工决策、异常接管、发布与交付确认
-Runtime / Git Manager → 校验主体与策略，保存决策，汇总并发布状态
+Runtime / Git Manager → 校验主体与策略，本地保存决策并汇总状态
 ```
 
 评估器不持有 main 推送凭据、不直接修改运行记录或被评估成果。评估环境使用固定输出的隔离副本，允许测试产生临时文件；不能把修改后的内容当作原输出审核。脚本从 source_commit 取得可信脚本及评估配置，以固定输出副本为工作目录；不执行 Attempt 擅自改写的审核脚本。AI 工具输出和脚本返回值不能指定人类身份，主体由 Runtime 根据受信会话或评估调用填写。
@@ -97,7 +99,7 @@ Runtime / Git Manager → 校验主体与策略，保存决策，汇总并发布
 | evidence_files | 仅 AI 原始输出使用：本次调用生成证据的相对路径；Adapter 导入后只在持久 GateReport 中保存 Artifact `evidence_refs` |
 | created_at | UTC ISO 8601 |
 
-Runtime 在调用前分配 report_id，持久化本地任务与实际初始请求；发布报告前将请求保存为持久 Artifact 并校验引用，留存范围见 [Execution](04-execution.md)。请求固定上述身份、上下文、策略、输入/输出 Commit 和冻结的执行证据。审核者可读取 Requirement、任务上下文及自己的审核要求；运行档案只按显式证据引用提供，不作为项目定义输入。
+Runtime 在调用前分配 report_id，持久化本地任务与实际初始请求；保存报告前将请求保存为持久 Artifact 并校验引用，留存范围见 [Execution](04-execution.md)。请求固定上述身份、上下文、策略、输入/输出 Commit 和冻结的执行证据。审核者可读取 Requirement、任务上下文及自己的审核要求；运行档案只按显式证据引用提供，不作为项目定义输入。
 
 Artifact 的可读性按执行审核的 clone 检查。Git 已同步但本地未持有材料时，先导入匹配原引用的交换包；不把本地缺失当作成果被拒绝，也不能跳过材料直接批准。补齐原内容不改变冻结审核输入；新增执行证据仍须新 Attempt。
 
@@ -116,7 +118,7 @@ Artifact 的可读性按执行审核的 clone 检查。Git 已同步但本地未
 
 AI 调用的初始请求与执行回执按 Execution 规则留存，实际后续输入和原生事件通过本项报告证据引用。
 
-`ai_assisted` 的报告只提供建议，不推进状态；人类 Decision 必须引用该报告，可以不同意建议并说明理由。`ai` / `script` 的 completed 报告由 Runtime 转成相同 result 的 Decision；错误报告没有决策主体，不伪造 AI / 程序决策。报告可随 Attempt 的 gate_report_refs 独立发布，使人工审核与故障处理有可共享的依据。
+`ai_assisted` 的报告只提供建议，不推进状态；人类 Decision 必须引用该报告，可以不同意建议并说明理由。`ai` / `script` 的 completed 报告由 Runtime 转成相同 result 的 Decision；错误报告没有决策主体，不伪造 AI / 程序决策。报告可与 Attempt 的 gate_report_refs 在本地事务中保存；需要协作时显式导出记录快照。
 
 Gate 运行检查产生的报告属于审核输出：检查失败可以返回 Rejected，不能把该报告补入 Attempt 的 output_refs。每项 Gate 都读取固定执行材料，不自动消费其他 Gate 的结果；ai_assisted 的人类可读取本项 AI 建议，人工接管可读取本项故障/升级记录。
 
@@ -132,7 +134,7 @@ Gate 运行检查产生的报告属于审核输出：检查失败可以返回 Re
 | context_snapshot_ref | 是 | contexts/<sha256>.yaml，由文件名校验内容摘要 |
 | evaluated_tree、gate_policy_digest | 是 | 固定输出 Tree 与该项有效策略摘要 |
 | review_input_digest | 是 | Attempt 的固定审核输入摘要；与报告及评估请求一致 |
-| expected_attempt_digest | 是 | Runtime 本次写入前校验的已发布 Attempt 文件 SHA-256 |
+| expected_attempt_digest | 是 | Runtime 本次写入前校验的本地持久化 Attempt 文件 SHA-256 |
 | previous_decision_id | 是 | 同 Attempt、同 gate_id 的前一决策，首次为 null |
 | result | 是 | Approved、Rejected、Escalated 或 Blocked |
 | rationale、evidence_refs | 是 | 非空理由与证据引用列表，可无额外证据 |
@@ -168,23 +170,23 @@ created_at: "2026-11-09T12:00:00Z"
 
 缺少必要执行证据时返回 Blocked / Escalated。仅本地副本缺失时先导入原内容；Runtime 确认证据从未形成、已不可恢复或需要新增时，才将 Attempt 标记 failed，创建 ErrorRecord 交给错误 Gate。需要补测、重新执行或修改代码时，通过错误处置安排新 Attempt；人工接管不能追加材料绕过冻结规则。单纯解释已有材料写入 Decision 的 rationale。审核者额外要求新增测试时以 Rejected 说明理由，再由错误 Gate 安排新 Attempt，不能把额外要求当成已配置检查缺失。
 
-### 汇总、并发与发布
+### 汇总、并发与持久化
 
 Attempt 使用 `gate_decision_refs` 按 gate_id 保存各项最新 Decision；GateReport 用 `gate_report_refs` 记录各项最新报告。未产生决策的项视为待审，不单独建立 GateRun 对象。
 
 | 情况 | Attempt / CombinationRun |
 | --- | --- |
 | 部分 Approved，其余未完成 | 保持 waiting_gate |
-| 全部最新决策为 Approved | accepted / satisfied，发布成功才解锁后继 |
+| 全部最新决策为 Approved | accepted / satisfied，本地事务落地才解锁后继 |
 | 任一 Rejected | Attempt rejected，取消其余评估；创建 ErrorRecord，CombinationRun waiting_gate 等待错误处置 |
 | Escalated、Blocked 或评估 error | 保持 waiting_gate，转交人类处理；其他独立项可继续 |
 | 输入失效、取消或已有终态 | 取消该 Attempt 的成果评估，不接收迟到结果；failed / rejected 的错误处置另行校验 |
 
 发起评估、人工确认和人工接管都绑定同一 `(attempt_id, gate_id, review_input_digest, context_snapshot_ref, evaluated_tree, gate_policy_digest, previous_decision_id)`；报告任务还绑定 report_id。同一审核项同时最多一个活动评估任务。接管或明确重评前撤销旧任务，本地持久化撤销信息；迟到报告不进入有效引用，也不能自动生成 Decision。
 
-Runtime 串行接收各项结果，校验 Run 有效、Attempt 仍为当前 waiting_gate，并重新计算 review_input_digest、校验引用内容及该项前一决策。分项报告、决策和状态不参与 review_input_digest；其他 Gate 更新导致完整 Attempt 文件摘要变化时，可以在重新校验后合并，不要求重新评审未变的成果。`expected_attempt_digest` 记录合并时实际读取的版本，Git Manager 仍以该摘要进行原子校验。该项前一决策变化或材料变化时拒绝过期操作。新报告不允许替换已 Approved 的项；Rejected 后整个 Attempt 已终止。
+Runtime 串行接收各项结果，校验 Run 有效、Attempt 仍为当前 waiting_gate，并重新计算 review_input_digest、校验引用内容及该项前一决策。分项报告、决策和状态不参与 review_input_digest；其他 Gate 更新导致完整 Attempt 文件摘要变化时，可以在重新校验后合并，不要求重新评审未变的成果。`expected_attempt_digest` 记录合并时实际读取的版本，Runtime 仍以该摘要进行原子校验。该项前一决策变化或材料变化时拒绝过期操作。新报告不允许替换已 Approved 的项；Rejected 后整个 Attempt 已终止。
 
-Decision 与关联状态作为同一 main Commit 发布；引用的报告须同 Commit 发布或已存在且内容匹配。失败时保留本地待发布操作，不提前接受成果。以报告/决策 ID 去重，重启或重放不得重复生成决策。新评估使用新 ID，历史文件不覆盖。新 Attempt 的所有成果 Gate 都须重新审核，即使复用 Context Snapshot 也不能继承批准。
+Decision 与关联状态作为同一本地事务保存；引用报告须已持久化或同事务落地且摘要匹配。事务失败不提前接受成果，重放完成后再调度。以报告/决策 ID 去重，重启或重放不得重复生成决策。新评估使用新 ID，历史文件不覆盖。新 Attempt 的所有成果 Gate 都须重新审核，即使复用 Context Snapshot 也不能继承批准。
 
 ## 错误 Gate：处置执行问题
 
@@ -213,7 +215,8 @@ flowchart TD
 | 成果 Gate Rejected | rejected Attempt → ErrorRecord → 错误 Gate |
 | 成果评估器异常或无法判断 | 原成果项人工接管或对原材料重评 |
 | 错误评估器异常、无法形成请求或无法提出有效动作 | 保留故障报告，blocked，交给人类；不递归错误处置 |
-| 本地 main 提交或本地 Artifact 持久化暂不可用 | 保留待发布操作，不假装正式审核已开始 |
+| 本地事务或 Artifact 持久化暂不可用 | 保留恢复信息，完成持久化前不开始正式审核或推进状态 |
+| main 暂不可写 | 仅阻塞最终采纳，不阻塞已满足本地条件的执行与 Gate |
 | Git 远端同步暂不可用 | 不改变本地已生效决定，不阻塞满足本地条件的审核、恢复或交付 |
 | 完成后最终汇聚或交付失败 | IntegrationReport blocked / failed；修改成果须新 Run |
 
@@ -252,7 +255,7 @@ trigger_decision_ref: null
 created_at: "2026-11-09T12:00:00Z"
 ```
 
-示例省略的冲突详情应以 evidence_refs 保存，实际记录须能定位路径和各方内容。Runtime 先持久化错误事实和可用材料，再发布错误档案；不为满足成果审核字段而创建虚假 Commit 或 Snapshot。
+示例省略的冲突详情应以 evidence_refs 保存，实际记录须能定位路径和各方内容。Runtime 将错误事实、可用材料和关联状态共同持久化；不为满足成果审核字段而创建虚假 Commit 或 Snapshot。
 
 ### 错误评估协议与决定
 
@@ -291,8 +294,8 @@ Runtime 在生成 Decision 前按 ErrorRecord 和当前外部引用状态校验�
 
 | 动作 | Runtime 校验与效果 |
 | --- | --- |
-| retry_current | 原节点输入仍有效，旧 Worker 已停止或隔离；发布后新建 Attempt。对 `pre_assess_blocked`，仅在 `wait_condition` 非空且 Runtime 确认同一引用已恢复、内容摘要匹配时可重试，并须复用原 Context Snapshot；若缺少需求信息或需变更输入，不能在该 Run 重试，必须创建替代 Run |
-| repair_upstream | 目标为同 Run 祖先，指令非空；发布后目标及全部后继失效、按 DAG 重执行 |
+| retry_current | 原节点输入仍有效，旧 Worker 已停止或隔离；本地事务落地后新建 Attempt。对 `pre_assess_blocked`，仅在 `wait_condition` 非空且 Runtime 确认同一引用已恢复、内容摘要匹配时可重试，并须复用原 Context Snapshot；若缺少需求信息或需变更输入，不能在该 Run 重试，必须创建新 Run；需求内容变化时同时创建新 Requirement |
+| repair_upstream | 目标为同 Run 祖先，指令非空；本地事务落地后目标及全部后继失效、按 DAG 重执行 |
 | wait | 仅当 ErrorRecord.wait_condition 非空且该引用仍暂时不可读时有效；节点 blocked 并保留 active_error_ref，不自动轮询或重发。引用恢复后需显式按固定 Gate 模式重新评估；retry_current 创建的新 Attempt 复用原 Snapshot |
 | stop_run | 取消尚未结束的 Run，停止其活动任务；已接受历史不改写 |
 
@@ -315,22 +318,22 @@ gate_policy_digest: sha256:<error-policy-digest>
 review_input_digest: sha256:<error-review-digest>
 expected_combination_digest: sha256:<combination-file-digest>
 previous_decision_id: null
-action: wait
+action: stop_run
 rationale: 需人类调整 Scope 定义并启动新 Run
 evidence_refs: []
 decided_by: {kind: human, id: "user:ling"}
 created_at: "2026-11-09T12:00:00Z"
 ~~~
 
-AI/脚本的 retry_current、repair_upstream 每次消耗一个 Run 级额度；默认 3 次。Runtime 在同一事务中校验并增加 auto_recoveries_used、记录动作 ID、关联状态和待发布意图；同一决定不重复扣减。耗尽后保留报告交给人类，不执行超额动作。人类恢复不消耗自动额度，不重置计数。
+AI/脚本的 retry_current、repair_upstream 每次消耗一个 Run 级额度；默认 3 次。Runtime 在同一事务中校验并增加 auto_recoveries_used、记录动作 ID、关联状态和恢复动作意图；同一决定不重复扣减。耗尽后保留报告交给人类，不执行超额动作。人类恢复不消耗自动额度，不重置计数。
 
-决定发布前重新校验 Run 非终态、当前需求有效、当前错误及前一决定未变、有效策略和材料摘要匹配、修复范围和额度可用。记录并发写入用 expected_combination_digest；Run 计数也在同一事务比较更新。其他错误决定若已让该节点 stale、替换 Attempt 或取消 Run，当前动作作废。旧错误及决定保留，不能自动重放成新动作。
+决定落地前重新校验 Run 非终态、需求尚未采纳且输入有效、当前错误及前一决定未变、有效策略和材料摘要匹配、修复范围和额度可用。记录并发写入用 expected_combination_digest；Run 计数也在同一事务比较更新。其他错误决定若已让该节点 stale、替换 Attempt 或取消 Run，当前动作作废。旧错误及决定保留，不能自动重放成新动作。
 
-Decision、额度和关联状态作为同一个 main Commit 发布，成功后才安排恢复 Worker。错误处置永不设置 accepted_attempt_id；新 Attempt 的所有成果 Gate 重新审核。定义与权限边界不能通过动作扩展，需要改 Requirement、Scope 或策略时由人类发布定义并新建 Run。
+Decision、额度和关联状态作为同一个本地事务保存，完整落地后才安排恢复 Worker。错误处置永不设置 accepted_attempt_id；新 Attempt 的所有成果 Gate 重新审核。定义与权限边界不能通过动作扩展：修改需求创建新 UUID；修改 Scope 或策略由人类提交定义，再创建新 Run。
 
 ## Refinement：运行精炼
 
-Refinement 将已结束运行的有效经验转化为具体改进，同时清理已处理档案。界面入口为「运行精炼」，CLI 为 `facetloom refine`。
+Refinement 将已采纳运行的有效经验转化为具体改进，同时清理已处理档案；作为独立维护提交，不为原需求追加执行日志。未采纳的失败记录留在本地，可显式导出，不通过精炼自动归档 main。界面入口为「运行精炼」，CLI 为 `facetloom refine`。
 
 ```mermaid
 flowchart TD
@@ -374,7 +377,7 @@ items:
 approved_diff_digest: null
 ```
 
-`disposition` 为 `adopt`、`keep` 或 `discard`，均由人类确认；未选择按 keep 处理。来源固定到 Commit、路径与摘要。建议可修改需求、Workflow、Facet、引用资料、实现或测试；人类审阅的 Diff 包含实际改进和拟清理内容，确认后记录摘要，Diff 变化必须重新确认。
+`disposition` 为 `adopt`、`keep` 或 `discard`，均由人类确认；未选择按 keep 处理。来源固定到 Commit、路径与摘要。建议可修改 Workflow、Facet、引用资料、实现或测试；涉及需求目标变化时创建新的独立 Requirement，不改写已采纳需求。人类审阅的 Diff 包含实际改进和拟清理内容，确认后记录摘要，Diff 变化必须重新确认。
 
 ### 清理规则
 
@@ -399,7 +402,7 @@ approved_diff_digest: null
 
 Commit 描述包含：`FacetLoom-Refinement: <id>`、人类确认主体、问题与改进、验证结论、清理或丢弃理由，以及删除前的 `<commit>:<path>`。应用后崩溃时按 Trailer 查找并校验已提交内容，恢复会话，避免重复应用。
 
-不生成永久的精炼审批目录。回退改进 Commit 会同时恢复该 Commit 删除的 Git 记录，但不会恢复另行 purge 的 Artifact；缺失内容须从仍持有的交换包或其它副本导入。Requirement 版本恢复旧语义时仍按新版本发布，不将 current 指针倒退。
+不生成永久的精炼审批目录。回退改进 Commit 会同时恢复该 Commit 删除的 Git 记录，但不会恢复另行 purge 的 Artifact；缺失内容须从仍持有的交换包或其它副本导入。需求成果也可用 Git revert 回撤；原采纳仍在历史中，不重启或重新交付原需求。
 
 ### 保留目标
 

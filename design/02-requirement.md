@@ -1,36 +1,44 @@
 # Requirement
 
-Requirement 是稳定的需求系列 ID；Requirement Version 是该系列一个完整、可独立理解的定义。`REQ-001/r1` 和 `REQ-001/r2` 内容及执行历史分开保存。新版本取代当前版本，不覆盖旧需求文件；运行档案在 Refinement 后可清理，历史由 Git 保留。
+Requirement 是一次独立的需求，以 UUIDv4 标识。**一个需求最多对应 main 上一次 squash 采纳提交**，同时保存需求、代码和精简运行档案。执行失败、取消或放弃均不自动提交 main。
 
 ## 对象关系
 
 ```mermaid
-flowchart TD
-    RV[Requirement Version] --> WR[WorkflowRun]
-    SC[source_commit] --> WR
+flowchart LR
+    R[本地 Requirement 草稿] --> F[冻结 requirement_ref]
+    F --> WR[WorkflowRun]
+    SC[source_commit：代码与定义基线] --> WR
     DAG[dag.yaml] --> WR
     WR --> CR[CombinationRun]
     CR --> AT[Attempt]
-    AT --> CS[Context Snapshot]
-    AT --> CP[Checkpoint]
-    AT --> GR[各 Gate 的报告]
-    AT --> GD[各 Gate 的决策]
-    GD --> ALL[全部批准]
-    ALL --> CR
+    AT --> G[检查与 Gate，本地生效]
+    G --> I[最终集成与人类确认]
+    I --> M[一次 squash：需求 + 代码 + 精简档案]
 ```
 
-一次 WorkflowRun 固定一个 Requirement Version、一个输入 Commit 和一份组合 DAG。每个业务 Combination 在该 Run 中最多有一条 CombinationRun；每次节点级重试都创建新的 Attempt；同一 Worker 内的代码修复与检查重跑不新建 Attempt。
+| 对象 | 身份与边界 |
+| --- | --- |
+| Requirement | 一个明确目标及验收条件；冻结后内容不可变 |
+| WorkflowRun | 固定需求、代码与定义基线、组合 DAG 的一次运行；同一需求可有多次运行 |
+| CombinationRun | Run 中一个业务节点的状态；同一节点最多一条 |
+| Attempt | 节点的一次准备、执行与审核；重试创建新 Attempt |
+| DeliveryRecord | 一次成功采纳的不可变回执；与成果同 Commit 保存 |
 
-## Requirement Version
+## Requirement 文件与生命周期
 
-版本文件按 `.facetloom/requirements/<requirement-id>/<version>.md` 保存并纳入 Git。Requirement ID 使用 `[A-Za-z0-9][A-Za-z0-9_-]*`；版本号使用 `r[1-9][0-9]*`。确认后的版本不可变；需求内容变化须创建新版本。每个新版本的 `supersedes` 必须指向当前版本，版本历史保持线性。文件使用 Markdown 和 YAML front matter 保存 Requirement ID、版本号、取代版本、标题、目标、验收条件、约束及资料引用。未提交的草稿不能启动 WorkflowRun。
+```text
+.facetloom/.runtime/requirements/<requirement-id>/requirement.md  # 本地草稿
+    ↓ 人类确认，首次启动前冻结完整原始字节
+artifacts://sha256/<digest>                                    # requirement_ref
+    ↓ 多次 Run、最终检查、人类确认采纳
+.facetloom/requirements/<requirement-id>.md                     # 一次提交 main
+```
 
 ```markdown
 ---
 schema_version: 1
-requirement_id: REQ-001
-version: r1
-supersedes: null
+requirement_id: 9e2c1f78-6a54-4d92-8e31-05b7a19c2f60
 title: 登录失败限制
 ---
 
@@ -48,37 +56,31 @@ title: 登录失败限制
 - docs/authentication.md
 ```
 
-版本文件是完整定义，不隐式继承旧版本。目录和 front matter 中的 Requirement ID、版本号必须一致。Requirement Version ID 为 `<requirement_id>/<version>`，例如 `REQ-001/r1`。仓库内资料路径按 `source_commit` 中的仓库根目录解析；外部资料必须使用不可变 Git 引用或内容哈希。凭据不写入 Requirement 文件。
+首次冻结在 Requirement 锁下保存 `.runtime/requirements/<requirement-id>/frozen.yaml`，内容为 `{schema_version: 1, requirement_id, requirement_ref}`；Artifact 先持久化，绑定通过本地文件事务写入且不再修改。后续启动只使用该绑定，校验工作副本与冻结字节一致；它与各 Run 共同参与本地引用保护。此锁不与 Run 锁同时持有。
 
-Front matter 中 `schema_version`、`requirement_id`、`version`、`supersedes` 和 `title` 必填；首版 `supersedes` 为 `null`，后续版本填写同一需求系列的前一版本号，例如 `r1`。正文必须提供非空 Goal 和至少一条 Acceptance Criteria；Constraints 与 References 可为空。
+Front matter 必填 `schema_version: 1`、`requirement_id` 和非空 `title`，ID 与文件路径一致；正文必有非空 Goal 和至少一条 Acceptance Criteria。Constraints 和 References 可为空。仓库资料按所属 Run 的 source_commit 解析；外部引用须固定 Commit 或内容哈希，不写入凭据。
 
-## `current.yaml`
+| 阶段 | 规则 |
+| --- | --- |
+| 草稿 | 仅在本地编辑，尚未启动 Run |
+| 冻结 | 首次启动前保存原始 Markdown 字节为 Artifact，生成 requirement_ref；以后各 Run 必须使用相同 ID 和字节摘要 |
+| 执行 | Run 与 Gate 通过本地文件事务生效，main 不增加中间记录 |
+| 采纳 | 将冻结字节原样写到正式路径，与代码、精简档案和回执一起 squash 到 main |
+| 失败、取消或放弃 | 保留本地记录；可显式导出，不自动加入 main |
 
-当前 clone 的主分支（本文以 `main` 为例）上的 `.facetloom/requirements/<requirement-id>/current.yaml` 是该需求系列的当前版本指针。隔离 Worktree 中的同名文件可能是旧快照，不用于判断当前版本；其它 clone 的更新通过 Git 同步后才在本地可见：
+冻结后修改目标、约束或验收条件，创建新 UUID 的 Requirement；代码基线或执行定义变化而需求字节不变时，可用同一需求创建新 Run。已 completed / cancelled 的 Run 不重新打开。新需求不会自动取消其它独立需求，用户显式停止不再需要的本地运行。
 
-```yaml
-schema_version: 1
-requirement_id: REQ-001
-current_version: r1
-```
+启动及交付前检查 main 的可达历史中是否已有该 requirement_id 的采纳记录，包括已被精炼或 revert 的提交；有则返回已有结果，不再运行或重复交付。多次 Run 中仅一次可采纳，其余本地运行停止或标记不可交付。UUID 提供去中心化身份，不依赖全局编号服务；跨 clone 只有同步已知历史后才能发现重复。
 
-`schema_version` 必须为 `1`；`requirement_id` 和 `current_version` 均必需。`current_version` 是版本文件名，不含扩展名；它必须指向同目录中 ID 匹配的已提交版本文件。该文件不保存版本历史、需求状态或运行状态。
+展示按 main 历史中的采纳顺序排列，使用“第几个需求 · 标题 · 短 UUID”；序号是当前视图的位置，不写入身份或用于引用。祖先先于后代；手工 Git 合并形成并列历史时，以 Commit OID 稳定排序，序号可随同步改变。草稿与未采纳运行单独展示，不占采纳序号。
 
-创建首个版本时，同一 Git Commit 添加版本文件和指针。发布后续版本时，同一 Commit 添加新版本文件并更新指针；新版本的 `supersedes` 必须等于更新前的 `current_version`。指针只能前进到新发布且取代当前版本的定义，不能直接回退；恢复旧语义时发布一个取代当前版本的新版本。提交基于本地 main 的最新头并校验原指针，进入本地 main 即生效，不等待 push。不同 clone 并发发布的版本在同步时按 Services 的业务冲突规则解决，不能静默覆盖或承诺全局唯一的版本分配。
-
-```mermaid
-flowchart LR
-    R1[r1 + current=r1] -->|单个 Git Commit| R2[r1 + r2 + current=r2]
-    R2 -->|同步 clone| C[取消旧版本未终态运行]
-```
-
-只有本地 main 的 `current.yaml` 指向的版本可启动新 WorkflowRun、推进有效成果或集成交付。旧版本仍可发布取消、失败及历史证据档案，不能借归档恢复执行或接受新成果。WorkflowRun 启动时固定包含该版本的 `source_commit`。其他 clone 将新指针同步到自己的 main 后，停止并取消自己拥有的旧版本未终态运行；已接受成果保留为历史，不得进入新版本。生效发布或集成前重新读取本地 main 并校验指针，不强制 fetch。仅运行档案变化不使成果失效；其余输入变化则需新 Run。同步前已发生的决策或交付照实保留，不声称已阻止另一 clone 的未知操作。取消与历史归档按 Services 的发布分类处理，不同运行的档案使用各自 run_id 目录。
+Git revert 可回撤采纳的需求、代码和档案，历史采纳事实仍在，不自动重启或再次交付原需求。后续修改使用新需求；Git 回退不恢复已 purge 的 Artifact。
 
 ## WorkflowRun
 
-WorkflowRun 是一次完整 Combination DAG 的执行。`source_commit` 是唯一运行输入 Commit，固定 Requirement、当前指针、Workflow/Facet、引用资料和根代码基线；`.facetloom/runs/` 不参与执行输入。每个 clone 独立创建 UUIDv4 `run_id`，同时检查本地和 main 是否已使用该 ID；冲突时重新生成。
+WorkflowRun 是一次完整 Combination DAG 的执行。`source_commit` 固定 Workflow/Facet、runner、审核配置、引用资料和根代码基线；新需求由独立 `requirement_ref` 固定，不要求预先提交 main。`.facetloom/runs/` 不参与执行输入。每个 clone 独立创建 UUIDv4 `run_id`，同时检查本地和 main 是否已使用该 ID；冲突时重新生成。
 
-本地 `.facetloom/.runtime/runs/<run-id>/` 保存完整运行状态，main 的 `.facetloom/runs/<run-id>/` 保存关键节点的精简档案。同一 Run 由创建它的 Runtime 写入，首阶段不支持跨 clone 接管活动 Worker。
+本地 `.facetloom/.runtime/runs/<run-id>/` 保存完整运行状态，仅采纳时将精简档案写到 main 的 `.facetloom/runs/<run-id>/`。同一 Run 由创建它的 Runtime 写入，首阶段不支持跨 clone 接管活动 Worker。
 
 WorkflowRun 的必需字段如下：
 
@@ -86,14 +88,13 @@ WorkflowRun 的必需字段如下：
 | --- | --- | --- |
 | `schema_version` | 是 | WorkflowRun 记录格式版本，当前为 `1`。 |
 | `run_id` | 是 | UUIDv4 运行 ID；创建后不变。 |
-| `requirement_version_id` | 是 | 固定的 Requirement Version ID。 |
+| `requirement_id` | 是 | 独立需求的 UUIDv4。 |
+| `requirement_ref` | 是 | 冻结需求 Markdown 的 ArtifactRef；校验内容摘要及 front matter ID。 |
 | `source_commit` | 是 | 同一仓库中定义与根代码基线的不可变 Git Commit。 |
-| `replaces_run_id` | 是 | 本 Run 替代的旧 WorkflowRun；普通新运行填 `null`。非空时须指向本地 main 已发布且未终态的同项目 Run；本地可见历史中最多一个有效的未终态替代 Run。不同 clone 的竞争替代在同步时协调，不提供全局锁。 |
-| `requirement_path` | 是 | `source_commit` 中 Requirement Version 文件的仓库相对路径。 |
-| `current_pointer_path` | 是 | `source_commit` 中 `current.yaml` 的仓库相对路径；启动时验证其指向 `requirement_version_id`。 |
+| `replaces_run_id` | 是 | 显式替代的本地未终态 Run；同一 owner_runtime_id，普通运行填 null。按启动流程先停止旧 Run，再创建新 Run；跨 clone 不传递取消控制。 |
 | `workflow_id` | 是 | `source_commit` 中使用的 Workflow 稳定 ID。 |
 | `workflow_path` | 是 | `source_commit` 中 Workflow 定义的仓库相对路径。 |
-| `dag_snapshot_ref` | 是 | main 中 `.facetloom/runs/<run-id>/dag.yaml` 的固定路径。 |
+| `dag_snapshot_ref` | 是 | 运行目录内 `dag.yaml` 的固定相对路径；本地和最终档案使用相同布局。 |
 | `dag_digest` | 是 | `dag_snapshot_ref` 文件字节的 SHA-256 摘要；不是 Git Commit。 |
 | `owner_runtime_id` | 是 | 创建运行的 clone-local Runtime UUIDv4；标识本 Run 唯一调度和记录写入者。 |
 | `status` | 是 | WorkflowRun 当前状态。 |
@@ -107,13 +108,12 @@ WorkflowRun 的必需字段如下：
 
 启动流程：
 
-1. 读取本地 main 最新头，固定完整 OID 为 `source_commit`；无需配置 remote 或先 fetch。
-2. 校验 current 指针、Requirement、Workflow、Facet、必要检查、执行与评估的 runner、成果及错误 Gate 策略、评估器配置和引用资料；拒绝引用运行档案作为定义或资料输入。
-3. 生成并校验 DAG。若为替代运行，重新读取本地 main 并验证目标 Run 已发布、未终态且尚无有效未终态替代 Run；本地并发冲突时重新读取并拒绝重复替代。将 `replaces_run_id`、run.yaml、dag.yaml 和初始状态原子持久化到本地，再提交初始精简档案到本地 main。
-4. `replaces_run_id` 非空时，若旧 Run 由当前 Runtime 拥有，则新 Run 初始档案提交本地 main 后立即取消旧 Run；若由其它 clone 拥有，旧 Run 的所属 Runtime 在下次接纳替代关联时停止、取消仍未终态的旧 Run。已经完成或取消的旧 Run 保留历史，不回写终态。新 Run 发布失败时不得先取消旧 Run；Git 不提供跨 clone 的即时取消通知。
-5. 再次读取本地 main 检查 current 指针与正式输入。需求已过期则取消，输入变化则不再推进旧 Run；否则调度节点。仅运行档案的提交不影响固定输入。
+1. 校验需求文件并冻结为 Artifact；检查 UUID 未被采纳。读取本地 main 完整 OID 为 source_commit，无需 remote 或先 fetch。
+2. 校验 Workflow、Facet、必要检查、runner、成果及错误 Gate、评估器和引用资料；拒绝使用运行档案作为定义或资料输入。
+3. 生成并校验 DAG。若显式替代本地未终态 Run，先在旧 Run 锁下持久化替代操作 ID、新 run_id、调度撤销与停止意图，释放锁后再创建新 Run；旧 Run 已停止而新建失败时，以同一操作 ID 幂等重试，不恢复旧执行。不同时持两个 Run 锁。将新 run.yaml、dag.yaml、冻结需求引用及初始状态原子持久化。
+4. 再次校验 main 的正式输入仍匹配 source_commit、需求尚未采纳，然后调度节点。启动不写 main；正式输入变化则阻塞，要求固定新基线的新 Run。
 
-输入、`replaces_run_id`、`runners`、`error_gate`、`merge_engine` 和 `owner_runtime_id` 创建后不变；状态、原因与更新时间可推进。main 的记录提交不能修改 `source_commit`。交付基线规则见 [Execution](04-execution.md)。
+输入、`replaces_run_id`、`runners`、`error_gate`、`merge_engine` 和 `owner_runtime_id` 创建后不变。状态、原因与更新时间通过本地事务推进；不得在原 Run 修改 source_commit 或 requirement_ref。交付基线规则见 [Execution](04-execution.md)。
 
 | 状态 | 定义 |
 | --- | --- |
@@ -123,9 +123,9 @@ WorkflowRun 的必需字段如下：
 | `completed` | 所有业务 CombinationRun 均为 `satisfied`；最终交付可以仍待处理。 |
 | `cancelled` | 已停止调度；活动 Attempt 已取消或停止请求已持久化。 |
 
-cancelled 表示停止调度；Worker 是否实际退出单独展示，在途发布按 [Services](05-services.md) 对账后确定 Attempt 历史终态。
+cancelled 表示停止调度；Worker 是否实际退出单独展示。交付在途时先按 [Services](05-services.md) 对账 main，再决定是否可取消或放弃。
 
-`completed` 和 `cancelled` 为终态；需要改变已完成运行的输入或成果时创建新 WorkflowRun。旧版本运行的取消规则见 `current.yaml`，状态转换如下。
+`completed` 和 `cancelled` 为终态；需要改变已完成运行的输入或成果时创建新 WorkflowRun。状态转换如下。
 
 ```mermaid
 stateDiagram-v2
@@ -142,7 +142,7 @@ stateDiagram-v2
     cancelled --> [*]
 ```
 
-本地记录保存实时状态，本地 main 显示最近已发布状态。待提交决定不算已生效；Run / 节点状态的生效视图与本地 outbox 分开保存，防止尚未进入 main 的批准解锁后继。Worker 的开始与结束在本地持久化后再推进；等待 Gate、Gate 决策、失败、取消、运行完成与交付是档案发布节点。未提交操作重启后对账并重放；全部 Gate 批准提交本地 main 后才满足后继依赖。尚未推送不等于未生效，不阻塞后继、不重放已完成操作。同步状态不进入运行状态机。
+本地事务提交并完整落地后，报告、决策、accepted / satisfied 和恢复动作生效；全部成果 Gate 批准才解锁后继。无需向 main 发布正式审核请求或中间状态。事务失败不暴露半状态，恢复先重放再调度；Git 同步状态不进入运行状态机。
 
 ## 运行档案
 
@@ -161,27 +161,42 @@ stateDiagram-v2
 └── deliveries/<delivery-id>.yaml
 ```
 
+以上是采纳后 main 中的布局；执行期间相同相对路径位于 `.runtime/runs/<run-id>/`。
+
+| 归档内容 | 选择规则 |
+| --- | --- |
+| run.yaml、summary.md、dag.yaml | 必选，概括目标、最终结果、关键返工与未解决问题 |
+| CombinationRun 与 accepted Attempt | 每个业务节点的最终有效状态与成果必选 |
+| Snapshot、检查、Checkpoint、成果决策、IntegrationReport、DeliveryRecord | 保留上述成果的全部必需依据及引用闭包 |
+| 历史失败、拒绝和错误处置 | 选取能解释最终成果的必要记录；被保留对象引用时必须收录 |
+| 完整调用、日志及大文件 | 留在 Artifact，档案只存引用；不收录 Worker、心跳或队列 |
+
+未选中的历史材料保留本地，不得留下只在本地才能解析的 run_record。归档不改写 Attempt 冻结字段或不可变报告。
+
 对象文件只保存身份、输入引用、状态、简短结论和证据引用，不复制完整对话或原始日志。summary.md 是人类阅读的入口，列出目标、结果、关键决策、验证和未解决问题。
 
 Context Snapshot 按文件字节 SHA-256 命名且不可原地修改。CombinationRun 文件名为 `combination_id` UTF-8 字节的 SHA-256 小写十六进制；Attempt、ErrorRecord、Checkpoint、Decision、Report 和 Delivery 使用各自 UUIDv4。读取时校验 ID、文件名、摘要和引用关系。
 
-**Attempt 必须先在本地原子持久化，再启动 Worker。** 发布节点将关联状态与证据作为一个 main Commit 写入，Git 保留此前已发布状态；不要求每次内部状态变化都提交。其它 clone 同步后看到的是档案，不是活动 Worker 的恢复状态。
+**Attempt 必须先在本地原子持久化，再启动 Worker。** 关联状态和证据通过本地事务共同保存；只有最终采纳的精简档案进入 main。其它 clone 看到的是采纳档案，不是活动 Worker 的恢复状态。失败或取消的 Run 可以通过本地记录快照交换包分享。
 
-WorkflowRun completed 与交付分开；一个 Run 最多一次成功交付，重复请求返回已交付结果。CheckReport、IntegrationReport、交付意图及 DeliveryRecord 见 Execution。待交付运行保留所需记录。人类可明确放弃 completed 且未交付运行；publishing 结果未知时先对账，不能先放弃或清理。在 run.yaml 保存 delivery_abandonment，不改变 Run 终态；此后需新 Run 才能交付。已结束且不再服务恢复、审核或交付的记录可进入 Refinement；按项清理并保留未解决问题，不能删除有效引用的目标而不更新引用。
+WorkflowRun completed 与交付分开；一个 Requirement 最多一次成功采纳，因此一个 Run 也最多交付一次；重复请求返回既有结果。CheckReport、IntegrationReport、交付意图及 DeliveryRecord 见 Execution。待交付运行保留所需记录。人类可明确放弃 completed 且未交付运行；publishing 结果未知时先对账，不能先放弃或清理。在 run.yaml 保存 delivery_abandonment，不改变 Run 终态；此后需新 Run 才能交付。已采纳且不再服务恢复或审核的档案可进入 Refinement；未采纳记录只在本地保留或显式导出。精炼按项清理并保留未解决问题，不能删除有效引用的目标而不更新引用。
 
 WorkflowRun 清单 `run.yaml` 示例：
 
 ```yaml
 schema_version: 1
 run_id: 5f6e9c6e-2ee9-4f17-9c75-87234be8e4ba
-requirement_version_id: REQ-001/r1
+requirement_id: 9e2c1f78-6a54-4d92-8e31-05b7a19c2f60
+requirement_ref:
+  type: artifact
+  uri: artifacts://sha256/<requirement-digest>
+  digest: sha256:<requirement-digest>
+  media_type: text/markdown
 source_commit: 8b8c0f1...
 replaces_run_id: null
-requirement_path: .facetloom/requirements/REQ-001/r1.md
-current_pointer_path: .facetloom/requirements/REQ-001/current.yaml
 workflow_id: development
 workflow_path: .facetloom/workflows/development.yaml
-dag_snapshot_ref: .facetloom/runs/5f6e9c6e-2ee9-4f17-9c75-87234be8e4ba/dag.yaml
+dag_snapshot_ref: dag.yaml
 dag_digest: sha256:7d9a...
 owner_runtime_id: 7a93f6e2-5e63-4431-aec9-502b910cc114
 status: pending
@@ -231,8 +246,8 @@ stateDiagram-v2
     [*] --> pending
     pending --> running: 创建 preparing Attempt
     running --> waiting_gate: 成果或错误材料已冻结
-    waiting_gate --> satisfied: 成果全部批准并发布
-    waiting_gate --> pending: 发布重试决定
+    waiting_gate --> satisfied: 成果全部批准且本地事务落地
+    waiting_gate --> pending: 持久化重试决定
     waiting_gate --> blocked: 错误处置选择等待
     blocked --> waiting_gate: 请求重新处置原错误
     satisfied --> stale: 修复祖先或自身
@@ -292,18 +307,18 @@ updated_at: "2026-11-09T12:00:00Z"
 | 准备或执行失败 | failed，冻结 ErrorRecord | waiting_gate，设置 active_error_ref；后继不解锁 |
 | 成果、检查和证据完整 | waiting_gate，冻结成果输入 | waiting_gate；active_error_ref 为空 |
 | 成果 Gate 部分批准 | 保持 waiting_gate | 等待其他项 |
-| 成果 Gate 全部批准且发布成功 | accepted | satisfied，设置 accepted_attempt_id |
+| 成果 Gate 全部批准且本地事务成功 | accepted | satisfied，设置 accepted_attempt_id |
 | 任一成果 Gate Rejected | rejected，取消其余评估，创建 ErrorRecord | waiting_gate，转错误处置 |
 | 发现必需执行材料缺失，决定补测 | failed，保留已有审核记录，创建 ErrorRecord | waiting_gate，转错误处置；不修改冻结成果 |
 | 成果评估器故障或无法判断 | 保持 waiting_gate | 原项人工接管或重评，其他项可继续 |
-| 错误 Gate 选择 retry_current 并发布 | 旧终态不变，之后创建新 Attempt | pending，清空当前错误引用；后继仍等待 |
+| 错误 Gate 选择 retry_current 并持久化 | 旧终态不变，之后创建新 Attempt | pending，清空当前错误引用；后继仍等待 |
 | Pre-Assess 因固定外部引用暂时不可用而 wait | 旧 Attempt 与 ErrorRecord 保留 | blocked，条件恢复后重新处置原错误 |
-| 错误 Gate 选择 repair_upstream 并发布 | 停止失效范围内活动 Attempt | 目标与全部后继 stale，按依赖重新执行 |
+| 错误 Gate 选择 repair_upstream 并持久化 | 停止失效范围内活动 Attempt | 目标与全部后继 stale，按依赖重新执行 |
 | 错误 Gate 选择 wait / 自身故障或额度耗尽 | 旧终态不变 | blocked，保留错误引用与原因 |
 | 输入失效 | 活动 Attempt cancelled；终态保持 | stale，清空 accepted_attempt_id |
-| Run 取消 | 活动 Attempt cancelled；在途终态发布先对账，既有终态保持 | 未满足节点 cancelled；撤销活动评估 |
+| Run 取消 | 活动 Attempt cancelled；与本地决定按 Run 锁串行化，既有终态保持 | 未满足节点 cancelled；撤销活动评估 |
 
-只有 satisfied 满足后继依赖。恢复决定获准不等于接受成果；发布成功之前不能执行恢复动作。Run 还有可执行分支、活动 Worker 或自动错误处置时保持 running；没有可继续推进的工作且存在人工或外部等待时为 blocked。
+只有 satisfied 满足后继依赖。恢复决定获准不等于接受成果；本地事务落地之前不能执行恢复动作。Run 还有可执行分支、活动 Worker 或自动错误处置时保持 running；没有可继续推进的工作且存在人工或外部等待时为 blocked。
 
 ### 重试与向上游修复
 
@@ -325,11 +340,11 @@ updated_at: "2026-11-09T12:00:00Z"
 
 `wait` 仅适用于 Pre-Assess 已确认的固定外部引用暂时不可读取。等待期间 Run 与 CombinationRun 保持 blocked，原 Attempt、ErrorRecord 和 Context Snapshot 不变；Runtime 不自动轮询或重发调用。引用恢复可读后，用户显式请求重新处置同一 ErrorRecord；错误 Gate 按固定模式重新评估并生成决定。决定为 `retry_current` 时，新 Attempt 复用原 Snapshot 并重新运行 Pre-Assess。
 
-如果需要替换引用、补充需求内容、调整 Requirement、Workflow、Facet、Scope、runner 或其它执行上下文，必须先将定义和资料提交到 main，再创建固定新 Commit 的 WorkflowRun。新 Run 以 `replaces_run_id` 指明被替代的未终态 Run；若旧 Run 属于同一个 Runtime，则新 Run 初始档案成功发布后立即取消旧 Run；若属于其它 clone，则由旧 Run 的所属 Runtime 在下次同步时停止、取消旧 Run。保留旧运行记录；新 Run 初始档案发布失败时不得取消旧 Run。Git 不提供跨 clone 即时取消通知。不得修改旧 Snapshot 或在旧 Run 中追加输入。错误 Gate 不能修改 Requirement、Scope、执行定义或审核策略。completed / cancelled Run 不重新打开；最终汇聚或交付失败保留 IntegrationReport，修改成果须新 Run。
+需要修改需求时创建新 Requirement；仅调整 Workflow、Facet、Scope、runner 或资料等执行定义时，先由人类提交定义到 main，再创建固定新 source_commit 的 Run，需求未变可继续引用原 requirement_ref。可用 replaces_run_id 显式停止同 Runtime 的未终态旧 Run；其它 clone 的独立运行不受此关联控制。不得修改旧 Snapshot 或在旧 Run 中追加定义输入。错误 Gate 不能扩展需求、Scope 或审核策略。最终汇聚或交付失败保留 IntegrationReport，修改成果须新 Run。
 
 ### 状态原因
 
-WorkflowRun 在 blocked / cancelled、CombinationRun 在 blocked / stale / cancelled、Attempt 在 failed / cancelled 时填写 status_reason。rejected 的原因见成果 GateDecision。状态恢复后可清空当前原因，已发布历史由 Git 保留。
+WorkflowRun 在 blocked / cancelled、CombinationRun 在 blocked / stale / cancelled、Attempt 在 failed / cancelled 时填写 status_reason。rejected 的原因见成果 GateDecision。状态恢复后可清空当前原因，本地不可变决定保留；采纳后由 Git 保存精简档案。
 
 ```yaml
 status_reason:
@@ -342,7 +357,7 @@ status_reason:
       digest: sha256:<digest>
 ```
 
-code 为机器可读字符串，message 非空，related_refs 使用 Execution 的类型化引用。常用码包括 preparation_failed、pre_assess_blocked、pre_assess_failed、post_assess_failed、evidence_import_failed、evidence_reference_invalid、worker_lost、execution_failed、gate_rejected、gate_pending、upstream_invalidated、upstream_misaligned、requirement_superseded、permission_denied、input_conflict、recovery_budget_exhausted、error_gate_failed、user_cancelled。
+code 为机器可读字符串，message 非空，related_refs 使用 Execution 的类型化引用。常用码包括 preparation_failed、pre_assess_blocked、pre_assess_failed、post_assess_failed、evidence_import_failed、evidence_reference_invalid、worker_lost、execution_failed、gate_rejected、gate_pending、upstream_invalidated、upstream_misaligned、requirement_already_adopted、permission_denied、input_conflict、recovery_budget_exhausted、error_gate_failed、user_cancelled。
 
 ## Attempt
 
@@ -415,7 +430,7 @@ updated_at: "2026-11-09T12:00:00Z"
 | pending | 输入固定，尚未启动 Worker |
 | running | Worker 执行及预算内修复重检 |
 | waiting_gate | 成果材料冻结，等待各 Node 审核 |
-| accepted | 全部成果 Gate 批准并发布，输出可登记为有效成果 |
+| accepted | 全部成果 Gate 批准且本地事务落地，输出可登记为有效成果 |
 | rejected | 成果 Gate 拒绝，旧成果仅作证据 |
 | failed | 准备或执行失败，或确认必需执行材料缺失 |
 | cancelled | 尝试已停止或失效 |
@@ -430,11 +445,12 @@ worker_ref 属于本地状态，不写入 Git。新 Attempt 最多创建一个 W
 
 | 情况 | 恢复方式 |
 | --- | --- |
-| Runtime 重启 | 先恢复已提交文件事务，再对账 Worker、评估任务和待发布操作，最后恢复调度 |
-| Worker 无法对账 | Attempt failed，创建 ErrorRecord，按错误 Gate 决定恢复 |
-| 本地 main 提交失败或结果未知 | 保留待发布操作，按本地历史对账后重试，不提前解锁或重复恢复 |
-| main 推送失败或暂时离线 | 本地已生效结果保留，仅同步未完成；后续显式同步，不重放业务操作 |
-| 本地状态丢失 | 从 main 恢复已发布档案，Artifact 另从保留库或交换包恢复；不保证恢复未发布操作或活动 Worker，通常新建 Run |
-| 另一 clone 查看 | 读取 main 摘要；所需 Artifact 未持有时先导入交换包，再从其中的 Git bundle 恢复代码，不接管活动 Worker |
+| Runtime 重启 | 先重放文件事务，再对账 Worker、评估和交付意图，最后恢复调度 |
+| Worker 无法对账 | Attempt failed，保存 ErrorRecord，由错误 Gate 决定恢复 |
+| 本地状态事务失败 | 不暴露半状态；COMMITTED 后必须重放，落地前不解锁后继 |
+| 最终 main 更新失败或结果未知 | 保留交付意图，按 UUID、操作 Trailer 和提交内容对账，不重复采纳 |
+| main 推送失败或暂时离线 | 仅同步未完成，不回退本地执行或已完成的采纳 |
+| 本地状态丢失 | Git 恢复已采纳档案；Artifact 从保留库或交换包恢复。未采纳运行依赖本地备份，不保证恢复活动 Worker |
+| 另一 clone 查看 | 已采纳档案通过 Git；未采纳记录可显式导出快照。材料导入不接管 Worker、不恢复调度 |
 
 本地文件是恢复依据，SQLite 仅为可选索引和缓存。多对象事务、外部动作对账与崩溃恢复顺序见 [Services](05-services.md)；档案清理见 [Governance](03-governance.md)。

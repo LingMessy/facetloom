@@ -18,7 +18,7 @@ Layer:   start → Domain ─┬→ Application ─┐
                          └→ Data ────────┴→ Presentation → end
 ```
 
-每次运行用一个 `source_commit` 固定需求、定义、资料与代码基线。Git 只保留 main 分支，Worker 在 detached Worktree 和 Rootless Podman 环境中执行。镜像预装外部 Agent 及项目环境；runner 固定镜像、原生参数和配置。FacetLoom 调用 Codex、Claude Code、OpenCode、Pi Agent 等程序，不实现 Agent 引擎；原生免审批模式不改变 Scope 校验、必要检查和 Gate。
+每次运行用 `source_commit` 固定定义、资料与代码基线，用 `requirement_ref` 固定本地冻结的需求。一个需求使用独立 UUID，最终对应 main 上一个 squash 采纳提交。Git 只保留 main 分支，Worker 在 detached Worktree 和 Rootless Podman 环境中执行。镜像预装外部 Agent 及项目环境；runner 固定镜像、原生参数和配置。FacetLoom 调用 Codex、Claude Code、OpenCode、Pi Agent 等程序，不实现 Agent 引擎；原生免审批模式不改变 Scope 校验、必要检查和 Gate。
 
 ```text
 main：Requirement + Workflow + Facets + 正式代码 + 精简运行档案
@@ -27,7 +27,7 @@ main：Requirement + Workflow + Facets + 正式代码 + 精简运行档案
     ↓
 必要检查与预算内修复 → Checkpoint → 各 Node 的 Gate 全部批准 → 汇聚
     ↓
-最终集成检查与人类确认 → 代码提交 main
+最终集成检查与人类确认 → 需求、代码、精简档案和回执一次 squash 到 main
     ↓
 Refinement → 人类筛选记录 → Agent 建议 → 采纳并验证
     ↓
@@ -38,7 +38,7 @@ Refinement → 人类筛选记录 → Agent 建议 → 采纳并验证
 
 | 对象 | 含义 |
 | --- | --- |
-| Requirement Version | 完整需求版本，由 current.yaml 指向当前版本 |
+| Requirement | UUID 标识的独立需求；首次运行前冻结，内容变化创建新需求 |
 | Workflow / Facet / Node | 组合图规则、上下文维度和维度内节点 |
 | Combination | 节点替换积生成、带 Facet 来源映射的业务执行单元 |
 | WorkflowRun | 固定输入与 DAG 的一次运行 |
@@ -59,15 +59,15 @@ Refinement → 人类筛选记录 → Agent 建议 → 采纳并验证
 └── .runtime/                                     # 本地状态与持久 Artifact 库，不进入 Git
 ```
 
-每个协作者在自己的 clone 创建不同 Run。main 共享精简状态、结果、决策和证据引用；本地通过文件事务保存活动 Worker、待发布操作和恢复信息，SQLite 可选。大型证据、实际调用输入和完整对话保存在本地 Artifact 库；Git 外的代码快照用自包含 Git bundle 保留。记录覆盖 FacetLoom 提供的输入与可观测事件，不承诺外部 Agent 的隐藏推理或内部模型请求。
+每个协作者在自己的 clone 创建不同 Run。执行与 Gate 由本地文件事务保存并生效；只有最终采纳时才把需求、代码和必要的精简档案一次提交 main。失败、取消或放弃的记录留在本地，可显式导出。SQLite 仅可选索引。大型证据、实际调用输入和完整对话保存在本地 Artifact 库；Git 外的代码快照用自包含 Git bundle 保留。记录覆盖 FacetLoom 提供的输入与可观测事件，不承诺外部 Agent 的隐藏推理或内部模型请求。
 
-所有项目统一以提交到本地 main 为生效边界，无需配置 remote 即可运行、审核、交付和精炼。remote 仅用于用户按需同步更新；推送失败不撤销本地结果。其它 clone 的修改在同步到本地 main 后才影响运行，冲突需明确协调，系统不承诺全局即时一致。
+所有项目统一使用本地事务推进执行与 Gate，以一个提交进入 main 完成需求采纳；精炼另作维护提交。无需 remote 即可完成全部操作。remote 仅用于用户按需同步更新；推送失败不撤销本地结果。其它 clone 的修改在同步到本地 main 后才影响运行，冲突需明确协调，系统不承诺全局即时一致。
 
-Git 同步档案，内容按需传递：导出所选记录依赖的独立 Artifact 交换包，协作者通过现有渠道传递并校验导入。引用采用内容哈希，不是下载地址；其它 clone 未导入时仍可看摘要，需要材料的审核或恢复则暂停。默认不依赖 S3、Git LFS 或中心存储服务。
+Git 同步已采纳档案，内容按需传递：未采纳记录可冻结为本地快照，所选记录及依赖导出为独立 Artifact 交换包，协作者通过现有渠道传递并校验导入。引用采用内容哈希，不是下载地址；其它 clone 未导入时仍可看摘要，需要材料的审核或恢复则暂停。默认不依赖 S3、Git LFS 或中心存储服务。
 
 审核定义统一进入 Git。Workflow 与 Node 的必要检查累积，同一 Attempt 默认最多修复并重检 2 次；完成后冻结成果输入。执行失败或成果拒绝交给独立错误 Gate，决定重试、修复上游、等待或停止；默认人工，每个 Run 最多自动恢复 3 次。恢复获准不代表成果被接受，补测或修改冻结成果需要新 Attempt。
 
-只改变运行档案不会使运行输入失效。交付前对比 source_commit 与最新 main，排除 `.facetloom/runs/` 后有代码或定义变化则创建新 Run；交付提交保留最新档案。确认绑定具体候选与最终报告，同一 Run 最多一次成功交付；无代码变化也须检查和确认，通过回执记录结果。
+只改变运行档案不会使运行输入失效。交付前对比 source_commit 与最新 main，排除 `.facetloom/runs/` 后有代码或定义变化则创建新 Run；交付提交保留最新档案。确认绑定具体候选与最终报告，同一需求最多一次成功采纳；无代码变化也须检查和确认，同一提交保存需求与 no_change 结论，回执不自引 Commit OID。冻结后需求变化创建新 UUID；已采纳成果可 Git revert，历史保留且不重开原需求。需求列表按采纳顺序展示，序号仅用于阅读。
 
 Refinement 的界面入口为「运行精炼」，CLI 为 `facetloom refine`。采纳项验证成功后才清理对应记录；暂留问题、活动运行、待 Gate 和待交付证据继续保留。原记录通过 Git 历史追溯，清理目标是当前目录与 Agent 上下文，不重写历史。
 

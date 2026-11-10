@@ -368,7 +368,7 @@ development/feature:login/layer:domain
 
 ## 运行快照
 
-完成排除、桥接和传递约简的最终图先在本地持久化，再作为精简运行档案发布到 main：
+完成排除、桥接和传递约简的最终图先在 `.facetloom/.runtime/runs/<run-id>/dag.yaml` 持久化；最终采纳时作为精简档案写入 main：
 
 ~~~text
 .facetloom/runs/<run-id>/dag.yaml

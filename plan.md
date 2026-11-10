@@ -18,13 +18,13 @@
 
 CLI 随各阶段提供可操作的验证入口。每阶段完成验收后进入下一阶段；前期只构造后续需要的最小接口。
 
-所有阶段统一以提交进入本地 main 为业务生效边界，不区分本地/远程项目，也不要求配置 Git remote。用户显式同步 Git 历史；同步失败与业务状态分别处理，首阶段不提供自动同步服务。
+所有阶段以本地文件事务推进执行与 Gate，一个需求最终一次 squash 提交 main，同时保存需求、代码、精简档案和回执。失败、取消和放弃不自动提交 main；Refinement 是独立维护提交。不区分本地/远程项目，也不要求 remote。用户显式同步 Git 历史；同步失败与业务状态分别处理，首阶段不提供自动同步服务。
 
 ## 1. 定义与 DAG
 
 **依赖：** 当前设计规范。
 
-**交付物：** Requirement 与 current.yaml、Workflow、Facet、Scope、runner 和评估器定义的解析与校验；有序节点替换积、静态排除、旁路与传递约简、稳定 Combination ID 和 DAG 快照；必要检查累积与独立错误策略校验；CLI 定义校验与图预览。
+**交付物：** UUID Requirement 的本地草稿、冻结 Artifact 与最终文件、Workflow、Facet、Scope、runner 和评估器定义的解析与校验；有序节点替换积、静态排除、旁路与传递约简、稳定 Combination ID 和 DAG 快照；必要检查累积与独立错误策略校验；CLI 定义校验与图预览。
 
 **验收条件：**
 
@@ -35,31 +35,31 @@ CLI 随各阶段提供可操作的验证入口。每阶段完成验收后进入�
 
 **依赖：** 阶段 1 的有效定义与 DAG。
 
-**交付物：** 稳定的 clone-local Runtime 身份；WorkflowRun、CombinationRun、Attempt 的文件事务及崩溃重放；preparing 阶段与 ErrorRecord；单 Worker 的 detached Worktree、预装外部 Agent 的 Podman 镜像及首个非交互 CLI Adapter；Worker / Invocation / 原生会话的独立记录；统一 Agent 证据导入协议；保留 Scope 分组的 Context Snapshot、实际初始请求留存、CheckReport、Checkpoint 和本地内容寻址 Artifact 库；单写入者的本地 main 档案提交与工作目录保护；CLI 启动和查看。
+**交付物：** 稳定的 clone-local Runtime 身份；WorkflowRun、CombinationRun、Attempt 的文件事务及崩溃重放；preparing 阶段与 ErrorRecord；单 Worker 的 detached Worktree、预装外部 Agent 的 Podman 镜像及首个非交互 CLI Adapter；Worker / Invocation / 原生会话的独立记录；统一 Agent 证据导入协议；保留 Scope 分组的 Context Snapshot、实际初始请求留存、CheckReport、Checkpoint 和本地内容寻址 Artifact 库；本地记录与 main 写入隔离；CLI 启动和查看。
 
 **验收条件：**
 
-- 根节点从 preparing 执行到成果 waiting_gate；独立只读 Pre-Assess 先判断输入与适用性，输入不足或结果无效进入错误 Gate；不适用跳过执行但仍检查和审核。Adapter 解析原生 ExecutionResult，Runtime 结合预检与 Git Tree 判定 outcome；适用任务检查失败同次最多修复并重检 2 次，代码变化后全量重检。Post-AssessReport 与 CheckReport 均绑定最终 Tree，完整材料才冻结并发布。
-- 固定代码和证据可恢复、摘要可校验；执行失败、取消和材料发布失败可查询，不丢失待发布记录。
-- 无 remote 或 remote 暂不可用时仍能提交本地 main，发布与 Git 同步不混为一个状态。提交结果未知时按本地 Trailer 对账；干净的 main 工作目录正常更新，脏目录等待处理，其它分支不被切换，不自动 stash 或覆盖。
+- 根节点从 preparing 执行到成果 waiting_gate；独立只读 Pre-Assess 先判断输入与适用性，输入不足或结果无效进入错误 Gate；不适用跳过执行但仍检查和审核。Adapter 解析原生 ExecutionResult，Runtime 结合预检与 Git Tree 判定 outcome；适用任务检查失败同次最多修复并重检 2 次，代码变化后全量重检。Post-AssessReport 与 CheckReport 均绑定最终 Tree，完整材料才本地冻结并进入 Gate。
+- 固定代码和证据可恢复、摘要可校验；执行失败、取消和本地持久化失败可查询，不丢失恢复意图。
+- 无 remote、离线或 main 工作目录脏时仍可本地执行与审核；创建 Run、执行、检查和 Gate 均不改变 main。事务提交及崩溃重放不暴露半状态。
 - 无 S3、Git LFS 或共享存储时可完整执行。Artifact 先本地持久化，再发布内容引用；同 clone 按摘要去重，引用无本地路径或存储地址。回收 Worker 与 Worktree 不删除持久内容库。
 - 在原生免审批模式下，Worker 仍受容器、Scope 和凭据边界约束，无法直接写 main 或人类决策。
 - Adapter 完成 probe/start/continue/stop；镜像、程序、参数、配置或认证失败可定位。检查由 Runtime 独立执行，修复通过原生会话续接；缺失能力明确报错。
 - Post-Assess 以新会话和只读候选容器执行，不另建 Worker；越权修改、超时或无效结果进入错误 Gate，`concerns` 作为证据交成果 Gate 审核。
 - Pre-Assess、执行/修复、Post-Assess、AI Gate 与 Refinement 都可导入 `evidence_files`；传入 `evidence_refs` 仅允许引用本次请求白名单，Script Gate 只接受类型化引用。测试绝对/越界路径、符号链接、重复文件、数量和字节上限；导入任一文件失败时不发布部分结构化结果或报告。
-- `wait` 仅用于 Snapshot 中固定外部引用暂时不可用；恢复后重处置原错误并用同一 Snapshot 创建新 Attempt。新增或修改 Requirement、定义或上下文时创建 replacement Run 并引用旧 Run；同一 Runtime 拥有的旧 Run 在新 Run 发布后取消，其它 clone 由旧 Run 所属 Runtime 于下次同步时取消，不能虚称即时通知。
+- `wait` 仅用于固定外部引用暂不可用；恢复后处置原错误，以相同 Snapshot 创建新 Attempt。需求内容变化用新 UUID；执行定义变化用新 Run，可显式停止同 Runtime 的旧 Run，不设置跨 clone 取消协议。
 - runner 总时限从 Pre-Assess 开始，覆盖执行、修复、检查与 Post-Assess；停止意图、30 秒默认宽限与实际退出分别持久化。
 
 ## 3. 成果与错误 Gate
 
-**依赖：** 阶段 2 已发布的固定成果与审核材料。
+**依赖：** 阶段 2 本地持久化的固定成果与审核材料。
 
 **交付物：** human、ai_assisted、ai、script 的成果审核与错误处置；按 review_kind 区分的 GateReport 与 GateDecision；通过独立外部 Agent 会话执行 AI 审核，直接执行脚本审核；实际评估请求留存、人工接管与重评；CLI 审核和结果查询。
 
 **验收条件：**
 
-- 同一 Attempt 的各项 Gate 可并行审核，全部批准并发布后才接受成果；部分批准、AI 建议或评估故障均不能提前放行。
-- 四种 Gate 及错误恢复在相应决定进入本地 main 后生效，无需 push；推送失败不阻塞后继、不重复扣减额度或生成决定。
+- 同一 Attempt 的各项 Gate 可并行审核，全部批准且本地事务落地后才接受成果；部分批准、AI 建议或评估故障均不能提前放行。
+- 四种 Gate 及错误恢复在相应决定与关联状态的本地事务落地后生效，无需 main 提交；重启不重复扣减额度、生成决定或解锁。
 - 拒绝、自动评估故障、人工接管、过期请求和迟到结果按设计处理；报告更新不改变冻结的审核输入；外部程序成功退出但缺少有效结构化结论仍属故障。
 - AI 成果与错误 Gate 的 `evidence_files` 经同一隔离目录导入并写入 GateReport；越权引用或导入失败产生评估故障，不生成 Decision。Script Gate 不能返回本次调用生成的任意文件路径。
 - Post-Assess 的 `concerns` 不自动拒绝成果；其故障与无效结构化输出可恢复或人工接管，不覆盖原始检查报告。
@@ -71,21 +71,20 @@ CLI 随各阶段提供可操作的验证入口。每阶段完成验收后进入�
 
 **依赖：** 阶段 3 的分项决策与成果接受机制。
 
-**交付物：** DAG 并行调度、稳定排序、逐步基于真实共同祖先的多前驱汇聚、冲突清单、Scope 校验、受控重试与后继失效传播；Runtime 重启、原生会话能力检查与未知调用对账；archive / advance / delivery 发布分类及取消竞争；main 档案并发发布和 clone 协作；Artifact 交换包的闭合依赖导出、校验与原子导入；人工 purge 的保护检查、预览、确认及本地回执；可恢复的最终候选、IntegrationReport、绑定候选的交付确认与回执；CLI 取消、重试、恢复、交付与 Artifact 管理。
+**交付物：** DAG 并行调度、稳定排序、逐步基于真实共同祖先的多前驱汇聚、冲突清单、Scope 校验、受控重试与后继失效传播；Runtime 重启、原生会话能力检查与未知调用对账；本地取消与最终采纳竞争；main 一次 squash、工作目录保护与 Git 异步同步；Artifact 交换包的闭合依赖导出、校验与原子导入；人工 purge 的保护检查、预览、确认及本地回执；可恢复的最终候选、IntegrationReport、绑定候选的交付确认与回执；CLI 取消、重试、恢复、交付与 Artifact 管理。
 
 **验收条件：**
 
 - 通过 CLI 跑通登录限制 Demo：分支并行、汇聚等待全部前驱、冲突处理、审核和最终交付。
 - 事务提交前后崩溃、外部调用未知、本地 main 更新失败和重复操作不丢记录、不重复扣减恢复额度、不重复接受或交付；已生效结果不因 push 失败而回退。仅同步 Git 时明确标记缺失 Artifact，经现有渠道传递并导入独立交换包后，可从其中 Git bundle 恢复代码，不接管活动运行。
-- 分叉通过保留双方历史的 merge 候选处理；Git 文本无冲突但需求版本、竞争替代或记录更新不兼容时，人工协调后重验。固定 Commit 引用不因同步被改写，合并后新代码不继承旧候选的通过结论；外部 Git 更新也须在推进前检测并校验。
-- 导出缺少依赖即失败；导入校验来源 Git 记录、完整依赖、路径、大小和摘要，损坏、重复成员、链接、缺少或多余文件不能产生有效的部分导入结果；重复导入及中断恢复幂等。
-- purge 保护活动、待审核、待交付、待发布、恢复和其它有效记录的传递依赖；预览过期重新确认。人工删除仅历史依赖的内容先记本地回执，删除失败可重放；不改变 Git 冻结记录或其它 clone，重新导入可恢复内容，不承诺全局销毁。
-- 需求取代与上游修复正确停止或失效相关执行；过期成果不能交付，仅档案变化不使运行输入失效；旧需求仍可归档取消及历史证据。
-- Replacement Run 显式关联被替代 Run；新运行档案未进入本地 main 前不触发取消，同一 Runtime 拥有的旧 Run 在提交后取消，其它 clone 由旧 Run 所属 Runtime 在接纳替代关系后取消；尚未同步的 clone 不保证立即停止。终态与已发生交付保留为历史，不提供全局唯一性锁。
+- 同步不自动合并需求版本或重放采纳。Git 历史分叉、代码冲突及重复 UUID 由人类协调；固定引用保持可恢复，合并后的代码不继承旧检查结论，外部 Git 更新在推进前检测。
+- 导出缺少依赖即失败；支持已采纳 Git 来源及未采纳本地快照，导入校验来源、完整依赖、路径、大小和摘要，损坏、重复成员、链接、缺少或多余文件不能产生有效的部分导入结果；重复导入及中断恢复幂等。
+- purge 保护活动、待审核、待交付、交付在途、恢复和其它有效记录的传递依赖；预览过期重新确认。人工删除仅历史依赖的内容先记本地回执，删除失败可重放；不改变 Git 冻结记录或其它 clone，重新导入可恢复内容，不承诺全局销毁。
+- 上游修复正确失效相关执行；main 正式输入变化要求新 Run，仅 runs/ 变化不使输入失效。冻结需求字节变化创建新 UUID，相同字节的新基线可新建 Run；已采纳 UUID 不重复执行或交付。
 - 重启不重置总 deadline；PID 复用、容器查询失败、停止未确认和原生恢复不支持时，不重复启动或误判已退出。
-- 取消撤销未提交的 advance，本地 main 更新在途或确认丢失时先对账；历史终态保留，迟到批准不能解锁后继。
-- 最终检查通过并经绑定候选的人类确认后交付 main，保留最新档案；同一 Run 最多一次成功交付，无代码变化只提交回执，未形成候选不能伪造报告字段。
-- 无 remote 时完成交付；有 remote 时相同的本地提交即可成功。后续重复同步、推送失败及重启不重新交付，接纳新版后禁止旧运行继续推进或交付。
+- 取消与 Gate 共用 Run 锁，本地保存停止和撤销意图；交付 publishing 或结果未知时先对账 main，历史终态保留，迟到批准不解锁后继。
+- 最终候选包含冻结需求文件，检查通过并经人类确认后，恰一个 squash Commit 同时保存需求、代码、档案和回执；回执不填自身 OID，不补第二个提交。无代码变化仍一次采纳，未形成候选不伪造字段。
+- 无 remote 时完成交付；有 remote 时相同的本地提交即可成功。重复请求、main 更新后崩溃、推送失败及重启不重复采纳；按历史 UUID 与 Trailer 查找，即使档案已精炼或被 revert 也不重开原需求。
 
 ## 5. WebUI 与 Refinement
 
@@ -95,9 +94,9 @@ CLI 随各阶段提供可操作的验证入口。每阶段完成验收后进入�
 
 **验收条件：**
 
-- 通过界面完成 Demo，明确区分本地实时状态、已发布档案、运行完成和交付完成。
-- 分别展示待提交、本地已生效和 Git 同步状态；未推送不显示为未完成，publishing 表示正在提交本地 main。无 remote 可完成精炼，本地提交后会话 completed。
-- 调用详情能查看证据文件路径、导入状态、摘要和持久引用；整批导入失败时显示原因且无可引用的部分报告。错误页面只在固定引用暂不可读时允许 wait，并呈现同 Snapshot 重试与 replacement Run 两种恢复结果。
+- 通过界面完成 Demo，区分本地执行与已采纳档案、运行完成与交付完成。按 main 采纳顺序展示序号、标题、短 UUID，序号不作身份，未采纳内容单列。
+- 分别展示本地执行、待采纳、已采纳和 Git 同步状态；未推送不显示为未完成，publishing 表示正在提交本地 main。无 remote 可完成精炼，本地提交后会话 completed。
+- 调用详情能查看证据文件路径、导入状态、摘要和持久引用；整批导入失败时显示原因且无可引用的部分报告。错误页面只在固定引用暂不可读时允许 wait，并呈现同 Snapshot 重试、新 Run 与新需求的边界。
 - 至少一项真实运行经验转化为经验证的改进，并在同一提交中清理对应记录。
 - 部分采纳、验证失败、来源变化、会话中断和回退均可处理；保留未解决问题及有效引用，不误删活动、待审核或待交付证据。
 - Artifact 页面区分本地可用、尚未导入、已在本地清理和缺失/损坏；导入既有内容与新增证据分开。Refinement 不自动 purge，Git 回退不显示为已恢复被删除的 Artifact。

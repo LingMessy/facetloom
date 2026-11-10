@@ -1,6 +1,8 @@
 # Execution
 
-一次 Attempt 固定输入，在隔离 Worktree 中执行；本地 Checkpoint 支持汇聚，精简证据在关键节点发布到 main。最终只有人类接受并通过检查的代码进入 main。
+一次 Attempt 固定输入，在隔离 Worktree 中执行；Checkpoint、检查和 Gate 通过本地持久状态支持汇聚。最终人类采纳时，一次 squash 提交需求、代码与精简档案到 main。
+
+本文的运行对象路径以最终 `.facetloom/runs/<run-id>/` 表示；执行期间对应 `.facetloom/.runtime/runs/<run-id>/`，相对路径和字节摘要保持一致。保存报告、冻结输入和接受成果均不要求中间 Git 提交。
 
 ## 执行时序
 
@@ -36,25 +38,28 @@ sequenceDiagram
     RT->>GM: 完成证据与初始请求的持久化、引用校验
     RT->>RT: 固定执行结果、检查和 Post-Assess 证据，计算 review_input_digest
     RT->>RT: 持久化 waiting_gate
-    RT->>GM: 发布精简档案到 main
-    GM-->>RT: waiting_gate 材料发布成功
     RT->>G: 并行评估固定上下文、代码与证据
     G-->>RT: 分项报告 / 决策
-    RT->>GM: 串行校验并提交分项结果及关联状态
-    GM-->>RT: 全部批准发布成功后解锁后继
+    RT->>RT: 串行校验，本地事务保存分项结果及关联状态
+    RT->>RT: 全部批准且事务落地后解锁后继
 ```
 
-main 暂不可写时，本地保存待发布操作。发布 waiting_gate 前不展示为可正式审核；决策发布前不解锁后继。创建 Worker 无需逐状态提交 Git，但必须有可恢复的本地记录。
+本地 waiting_gate 事务落地后即可审核，决策及关联状态事务落地后解锁后继。main 暂不可写只影响最终采纳；本地持久化暂不可用则停止相关推进，先恢复事务，不暴露半状态。
 
 ## Context Snapshot
 
-路径：`.facetloom/runs/<run-id>/contexts/<sha256>.yaml`。先在本地运行目录构造，发布 Gate 材料时提交到本地 main。文件按字节 SHA-256 命名，输入变化创建新文件与新 Attempt。
+路径：`.facetloom/runs/<run-id>/contexts/<sha256>.yaml`。先在本地运行目录构造，仅最终采纳时随精简档案提交 main。文件按字节 SHA-256 命名，输入变化创建新文件与新 Attempt。
 
 ```yaml
 schema_version: 1
 run_id: <run-id>
 source_commit: <full-commit-oid>
-requirement_version_id: REQ-001/r1
+requirement_id: 9e2c1f78-6a54-4d92-8e31-05b7a19c2f60
+requirement_ref:
+  type: artifact
+  uri: artifacts://sha256/<requirement-digest>
+  digest: sha256:<requirement-digest>
+  media_type: text/markdown
 workflow_id: development
 combination_id: development/feature:login/layer:domain
 input_commit: <full-commit-oid>
@@ -64,7 +69,6 @@ merge_conflicts: []
 context:
   objectives: [实现登录失败限制领域规则]
   source_paths:
-    - .facetloom/requirements/REQ-001/r1.md
     - .facetloom/workflows/development.yaml
     - .facetloom/facets/feature/facet.yaml
     - .facetloom/facets/layer/facet.yaml
@@ -124,7 +128,7 @@ execution:
 
 | 内容 | 规则 |
 | --- | --- |
-| 来源文件 | source_paths 和 reference_paths 均相对仓库根，由 source_commit 固定；不含运行档案 |
+| 来源文件 | source_paths 和 reference_paths 相对仓库根，由 source_commit 固定；需求另由 requirement_ref 固定；不含运行档案 |
 | Node 与 Scope | 按 DAG members 解析；write_scope.all_of 保留每组路径与来源，禁止把交集压平成路径并集 |
 | 前驱输入 | direct_predecessors 各项固定 combination_id、attempt_id、output_commit |
 | 执行环境 | 引用 Run.runners 中的固定调用配置及摘要，记录独立读写范围、资源限制、检查环境、检查列表与预算；凭据只记录用途 |
@@ -250,7 +254,7 @@ Agent 可以省略 `evidence_files`，视为空列表。无效路径、超限、
 | evidence_refs | Agent 原始输出只能引用本次输入明确提供的类型化证据；规范化 Report 保存校验后的引用。not_applicable 至少一项 |
 | evidence_files | Agent 原始输出中的新证据相对路径列表，按本节协议导入；不进入 PreAssessReport |
 
-`ready + applicable` 才启动代码执行。`ready + not_applicable` 跳过代码执行并复用 input_commit，但仍执行必要检查、Post-Assess 和所有成果 Gate；若 input_merge 清单含未解决冲突，则不能据此跳过冲突处理，转错误 Gate。有效 `blocked` 报告创建 stage=`pre_assess`、code=`pre_assess_blocked` 的 ErrorRecord，不启动执行；Runtime 保留报告供恢复决策。只有报告在 `missing_inputs[].source_refs` 明确列出 Snapshot 中的固定引用，且 Runtime 验证它当前仅因可恢复的外部可用性故障暂不可读时，才记录 `wait_condition` 并允许错误 Gate 选择 wait。需求内容本身不足、引用不存在、摘要不匹配、输出结构无效或 Applicability 不明确都不能 wait；需新输入时发布新定义并创建替代 Run。风险发现是固定成果审核输入的一部分，不临时扩充策略。
+`ready + applicable` 才启动代码执行。`ready + not_applicable` 跳过代码执行并复用 input_commit，但仍执行必要检查、Post-Assess 和所有成果 Gate；若 input_merge 清单含未解决冲突，则不能据此跳过冲突处理，转错误 Gate。有效 `blocked` 报告创建 stage=`pre_assess`、code=`pre_assess_blocked` 的 ErrorRecord，不启动执行；Runtime 保留报告供恢复决策。只有报告在 `missing_inputs[].source_refs` 明确列出 Snapshot 中的固定引用，且 Runtime 验证它当前仅因可恢复的外部可用性故障暂不可读时，才记录 `wait_condition` 并允许错误 Gate 选择 wait。需求内容本身不足、引用不存在、摘要不匹配、输出结构无效或 Applicability 不明确都不能 wait；修改需求需创建新 Requirement；仅执行定义变化时提交定义并创建新 Run。风险发现是固定成果审核输入的一部分，不临时扩充策略。
 
 PreAssessReport 保存在 `.facetloom/runs/<run-id>/reports/<report-id>.yaml`，`report_type: pre_assess`，内容不可变。报告包含 schema_version、report_id、run_id、combination_id、attempt_id、invocation_ref、readiness、applicability、summary、missing_inputs、risk_findings、evidence_refs、created_at。invocation_ref 是不含报告自身的不可变 Invocation 证据 Artifact。有效报告通过 Attempt.pre_assess_ref 引用；blocked 时 ErrorRecord.evidence_refs 引用报告。预检未形成有效报告时，ErrorRecord 引用可用的调用输入、原生输出与故障证据，不伪造报告。输入不足不伪造成 ExecutionResult 或 CheckReport。
 
@@ -339,7 +343,7 @@ Post-Assess 由 Adapter 使用同一固定 runner 发起独立调用和新原生
 
 `status` 为 `complete` 或 `concerns`。`concerns` 必须带非空 findings；两种状态都须有非空 summary。Agent 原始输出的 `evidence_refs` 只能引用本次输入明确提供的证据，`evidence_files` 按统一协议导入；规范化 Post-AssessReport 仅保存类型化 `evidence_refs`。报告按 Attempt 的 output_refs 固定为执行证据。`concerns` 不自动判失败，由成果 Gate 审核；只读调用试图改成果、退出失败、超时或返回无效结构均使 Post-Assess 失败，形成 ErrorRecord 并进入错误 Gate。不得重新运行自检来覆盖此前报告。
 
-Post-AssessReport 保存在 `.facetloom/runs/<run-id>/reports/<report-id>.yaml`，`report_type: post_assess`，内容不可变。必需字段为 schema_version、report_id、run_id、combination_id、attempt_id、evaluated_tree、pre_assess_ref、check_report_ref、execution_result_ref、invocation_ref、status、summary、findings、evidence_refs、created_at。invocation_ref 是不含报告自身的不可变调用证据 Artifact；execution_result_ref 在 not_applicable 时为 null，其它 outcome 必须引用有效结果。发布前校验报告 Tree 等于最终 Checkpoint Tree、输入引用均可读取且匹配摘要；报告自身作为 role=evidence 的 run_record 加入 Attempt.output_refs。
+Post-AssessReport 保存在 `.facetloom/runs/<run-id>/reports/<report-id>.yaml`，`report_type: post_assess`，内容不可变。必需字段为 schema_version、report_id、run_id、combination_id、attempt_id、evaluated_tree、pre_assess_ref、check_report_ref、execution_result_ref、invocation_ref、status、summary、findings、evidence_refs、created_at。invocation_ref 是不含报告自身的不可变调用证据 Artifact；execution_result_ref 在 not_applicable 时为 null，其它 outcome 必须引用有效结果。本地保存前校验报告 Tree 等于最终 Checkpoint Tree、输入引用均可读取且匹配摘要；报告自身作为 role=evidence 的 run_record 加入 Attempt.output_refs。
 
 ```yaml
 schema_version: 1
@@ -415,7 +419,7 @@ Context Snapshot 是有效输入清单；Adapter 实际交给外部 Agent 的初
 | 引用 | 所属记录 | 保存时机 |
 | --- | --- | --- |
 | agent_input_ref | Attempt | 首次 Pre-Assess 调用前保存实际初始请求；waiting_gate 前验证持久可读 |
-| request_input_ref | GateReport | 调用自动评估器前保存实际初始请求；发布报告前验证持久可读 |
+| request_input_ref | GateReport | 调用自动评估器前保存实际初始请求；保存报告前验证持久可读 |
 
 ```yaml
 agent_input_ref:
@@ -440,7 +444,7 @@ Adapter 先将实际输入原子保存到本地 Artifact 库并计算摘要，�
     ↓
 代码、执行证据及初始请求持久化并校验
     ↓
-固定审核输入 → 发布 waiting_gate
+固定审核输入 → 本地事务保存 waiting_gate
     ↓
 各 Gate 审核 → 分项报告与决策 → 全部批准
 ```
@@ -451,7 +455,7 @@ Adapter 先将实际输入原子保存到本地 Artifact 库并计算摘要，�
 
 ```json
 {
-    "context_snapshot_ref": "contexts/<sha256>.yaml",
+  "context_snapshot_ref": "contexts/<sha256>.yaml",
   "input_commit": "<full-commit-oid>",
   "outcome": "changed",
   "summary": "实现登录失败限制，执行检查已完成",
@@ -479,7 +483,7 @@ source_commit
                         Worker → output_commit
 ```
 
-Git Manager 为有代码变化的 Attempt 创建一个输出 Commit，以 input_commit 为唯一父提交；无修改沿用输入 Commit，不创建空 Commit。Post-Assess 必须基于该固定输出，不能在生成 Checkpoint 后继续改代码；进入 waiting_gate 前只登记最终 Checkpoint，较早的未发布本地快照不作为正式输出。修改范围由 Runtime 校验，Worker 不能修改已发布定义或 `.facetloom/runs/`。资料和定义的改善由人类发布或 Refinement 完成。
+Git Manager 为有代码变化的 Attempt 创建一个输出 Commit，以 input_commit 为唯一父提交；无修改沿用输入 Commit，不创建空 Commit。Post-Assess 必须基于该固定输出，不能在生成 Checkpoint 后继续改代码；进入 waiting_gate 前只登记最终 Checkpoint，较早的中间本地快照不作为正式输出。修改范围由 Runtime 校验，Worker 不能修改固定定义、任何 Requirement 文件或 `.facetloom/runs/`；采纳时由 Git Manager 写入冻结需求。资料和定义的改善由人类发布或 Refinement 完成。
 
 | Checkpoint 字段 | 定义 |
 | --- | --- |
@@ -492,13 +496,13 @@ Git Manager 为有代码变化的 Attempt 创建一个输出 Commit，以 input_
 
 本地使用 `.runtime/worktrees/` 下的 detached Worktree 锚定仍需恢复的输入与输出 Commit；中间对象在有后继锚定或 bundle 验证通过前不移除 Worktree。无需 Run、Input 或 Checkpoint 命名分支。
 
-跨 clone 或长期引用、且未由 main 历史保留的代码输出，必须先导出自包含 Git bundle，覆盖复核所需的输入、输出、父提交与 Tree，再保存到本地 Artifact 库。用空临时仓库验证 bundle 可导入且包含所需对象，校验摘要后才发布引用。跨 clone 传递时将该文件收入 Artifact 交换包；接收方校验后才能从中恢复对象。日志中的裸 OID 不作为持久化保证。没有代码变化也需保证 input_commit 来自 main 可达历史或已有有效 bundle。
+跨 clone 或长期引用、且未由 main 历史保留的代码输出，必须先导出自包含 Git bundle，覆盖复核所需的输入、输出、父提交与 Tree，再保存到本地 Artifact 库。用空临时仓库验证 bundle 可导入且包含所需对象，校验摘要后才保存引用。跨 clone 传递时将该文件收入 Artifact 交换包；接收方校验后才能从中恢复对象。日志中的裸 OID 不作为持久化保证。没有代码变化也需保证 input_commit 来自 main 可达历史或已有有效 bundle。
 
 ## Artifact 存储与交换
 
 Artifact Store 是每个 clone 自有的持久文件库。单 clone 执行不依赖 S3、Git LFS 或共享存储；Git 共享档案与引用，Artifact 内容按需用独立文件传递。S3 等后端留作后续扩展。
 
-日常证据主要在产生它的 clone 内使用。导出 Artifact 交换包是可选协作操作，不是运行完成或档案发布的前置条件；代码恢复所需 Git bundle 的本地生成与保留要求仍按上节执行。
+日常证据主要在产生它的 clone 内使用。导出 Artifact 交换包是可选协作操作，不是运行完成或采纳的前置条件；代码恢复所需 Git bundle 的本地生成与保留要求仍按上节执行。
 
 ### 对象与目录
 
@@ -532,40 +536,56 @@ Artifact Store 是每个 clone 自有的持久文件库。单 clone 执行不依
 | 内容已由本地 purge 删除 | 已在本地清理；展示原因，可重新导入相同内容 |
 | 已登记但文件丢失或摘要不符 | 缺失或损坏；阻止使用，不视为检查失败 |
 
-可用性按当前文件检查，不写回不可变引用或审核摘要；重新导入成功后优先显示本地可用，旧清理回执仍保留。发布方发布档案前验证所需内容已在自己的库中持久可读，不要求其它 clone 已持有。同步 Git 只获得记录；从 Git 回退记录也不会恢复已删除的 Artifact。
+可用性按当前文件检查，不写回不可变引用或审核摘要；重新导入成功后优先显示本地可用，旧清理回执仍保留。拥有者采纳归档前验证所需内容已在自己的库中持久可读，不要求其它 clone 已持有。同步 Git 只获得记录；从 Git 回退记录也不会恢复已删除的 Artifact。
 
 查看摘要无需所有文件。审核、执行、代码恢复或导出需要的材料缺失时，列出缺项并暂停该操作，不能跳过检查或视为通过。导入既有引用的原内容不属于追加执行证据，不改变冻结字段。界面只读查看仍可继续；恢复内容后由用户重试原操作，不自动推进活动 Run。
 
 ### 显式导出与导入
 
 ```text
-clone A：固定 Git 记录 → 收集依赖 → 校验 → 导出 Artifact 交换包
-                                             ↓ 通过现有渠道传递
-clone B：同步 Git 记录 → 校验交换包 → 导入本地库 → 按需复核
+clone A：固定 Git 记录 或 本地不可变快照 → 收集依赖 → 导出交换包
+                                                        ↓ 现有渠道
+clone B：校验来源、摘要与依赖闭包 → 原子导入本地库 → 按需复核
 ```
 
-交换包采用未压缩 tar，示意文件名为 `run-evidence.facetloom-artifacts.tar`；包内只有 `manifest.yaml` 和 `objects/sha256/<hex>` 普通文件。manifest 的最小结构如下，尖括号表示示意值：
+交换包是独立未压缩 tar，包内只有 `manifest.yaml` 和 `objects/sha256/<hex>` 普通文件。来源有两种，可在同一包中组合：
 
 ```yaml
 schema_version: 1
 kind: artifact_exchange
-source_records:                       # 导出所选记录，固定到已有 Git Commit
-  - commit: <full-commit-oid>
+source_records:
+  - type: git_file                     # 已采纳档案，Git 历史另行同步
+    commit: <full-commit-oid>
     path: .facetloom/runs/<run-id>/attempts/<attempt-id>.yaml
+    blob_oid: <blob-oid>
     digest: sha256:<record-file-digest>
+  - type: local_snapshot               # 未采纳、失败或取消的本地记录
+    run_id: <run-id>
+    index_ref:
+      type: artifact
+      uri: artifacts://sha256/<snapshot-index-digest>
+      digest: sha256:<snapshot-index-digest>
+      media_type: application/yaml
 artifacts:
   - digest: sha256:<hex>
     byte_length: 821
-    media_type: application/json
-    dependency_refs: []                # 与 entry 相同的直接类型化依赖
+    media_type: application/yaml
+    dependency_refs: []
 ```
 
-1. **导出**：用户选择已发布 Run 或其中的记录，固定所在 Commit、路径和摘要。沿 run_record、git_file、git_object 的恢复来源及 Artifact 的 dependency_refs 收集完整传递依赖；已访问对象去重，拒绝非法循环。结构化对象的依赖须与其已识别 Schema 中的类型化引用一致，不靠任意文本匹配推断。任何必要记录或 Artifact 缺失时列出缺项，整包导出失败，不生成看似完整的包。
-2. **形成文件**：仅写所需 Artifact 字节，不打包整个 `.runtime/`、活动状态或凭据。文件写入临时路径，全部验证并持久化后原子改名到用户指定路径。固定 Git 记录仍经正常 Git 同步；交换包清单不代替这些记录。
-3. **校验**：接收方核对本地已持有的 source_records；仅在所需 Commit 或记录缺失时才要求先同步相应 Git 历史，不强制联网。核对传递依赖与包内清单、大小和逐文件摘要，拒绝缺项、多余文件、重复条目、重复摘要，以及非普通文件、链接、绝对或越界路径。只流式读取规定的成员，不将 tar 任意解压到目标目录。清单大小、文件数和总字节数受本地资源上限限制，导入前展示总量；不套用单次 Agent 证据的 10 MiB / 100 MiB 限额，以允许较大的 Git bundle。
-4. **导入**：全部内容校验通过后，在本地事务中一次提交新 entry 与整包回执；重复内容重新校验后复用。中断前未提交的内容不可用，已提交事务重放完成；任何失败都不发布有效的部分导入结果，既有对象不受影响。
+| 来源 | 固定方式与校验 |
+| --- | --- |
+| git_file | 校验 Commit、路径、Blob 和字节摘要；本地缺少历史时先通过 Git 补齐，不强制联网 |
+| local_snapshot | Run 锁下冻结选中记录及其闭合依赖，各文件原始字节保存为 Artifact；索引按路径排序，列出 `{run_id, path, record_ref}`，record_ref 为文件 ArtifactRef；索引本身也是 Artifact |
 
-清单及内容都作为不可信输入读取；摘要证明内容匹配，不代表其成果已经批准。导入不执行脚本、不更新 main、不接管 Worker，也不创建或恢复运行。代码恢复由后续显式操作完成，并按 Git bundle 规则重新验证。
+本地快照使用相对运行目录的路径解析 run_record；引用其它 Run 的不可变记录时也列入索引，无法固定其内容或同一 `(run_id, path)` 对应不同摘要时拒绝导出。run_record 的 digest 必须等于 record_ref.digest。索引和结构化记录的 entry 登记真实类型化依赖；run_record 经该索引解析，不能混用同路径的当前运行文件。固定完成后在锁外打包，所需 Artifact 保持保护。它是只读证据快照，不携带队列、Worker 身份、凭据或恢复执行的权限。
+
+1. **导出**：选择 Git 记录或本地 Run 记录。沿 run_record、git_file、git_object 的恢复来源及 Artifact.dependency_refs 收集完整传递依赖，按内容去重，拒绝非法循环。结构化对象按已知 Schema 识别引用，不扫描任意文本猜测；缺少必要记录或内容时整包失败，列出缺项。
+2. **形成文件**：只打包必需 Artifact，包括本地快照的索引与记录字节；不打包整个 `.runtime/`。临时文件全部校验并持久化后原子改名到用户指定 Git 外路径。git_file 指向的历史仍由 Git 传递，快照不冒充 main 中的已采纳记录。
+3. **校验**：核对来源、依赖闭包、大小和逐文件摘要；拒绝缺项、多余成员、重复条目/摘要、链接、非普通文件、绝对或越界路径。只流式读取规定成员，不任意解压。清单大小、文件数和总字节数受本地资源上限约束，导入前展示总量；不套用单次 Agent 证据上限，以允许较大的 bundle。
+4. **导入**：全部校验后，通过本地事务一次提交 entry 与整包回执；重复内容复核后复用。未提交内容不可见，已提交事务幂等重放；失败不发布有效的部分导入结果。快照只存为 Artifact，不覆盖 `.runtime/runs/` 或 main 档案。
+
+摘要证明内容匹配，不代表来源可信或成果已批准。导入不执行脚本、不修改 main、不采纳需求、不接管 Worker，也不启动或恢复 Run。代码恢复是后续显式操作，仍须验证 Git bundle。
 
 ### 保留与人工 purge
 
@@ -573,7 +593,7 @@ artifacts:
 
 | 引用或使用情况 | 本地删除规则 |
 | --- | --- |
-| 活动运行、待审核、待交付、待发布、仍用于恢复 | 保护其完整依赖，不允许 purge |
+| 活动运行、待审核、待交付、交付在途、仍用于恢复 | 保护其完整依赖，不允许 purge |
 | main 当前保留的其它有效记录仍依赖 | 保留，包括经 git_file 固定到历史文件的依赖 |
 | 本地精炼会话、未完成事务或导入/导出正在使用 | 暂时保护；完成或显式结束后重新评估 |
 | 仅 Git 历史记录依赖，或已确认无引用 | 人工预览、确认后可 purge；历史内容将无法在本地取回 |
@@ -633,7 +653,7 @@ related_refs:
     digest: sha256:<file-bytes-digest>
 ```
 
-run_record 的路径相对对应运行目录，不得越出目录。Context Snapshot、ErrorRecord、Decision、Checkpoint 和 Report 引用的目标必须同 Commit 发布或已存在且内容匹配。清理时保留有效引用目标；仅当引用字段可更新时，才可先转换成删除前 Commit 的 git_file。不可变对象或 Attempt 的冻结字段仍被保留时，其依赖也保留。Attempt 用稳定 ID 关联；审核材料由 review_input_digest 校验，记录并发写入另用完整 Attempt 文件摘要。
+run_record 的路径相对对应运行目录，不得越出目录。Context Snapshot、ErrorRecord、Decision、Checkpoint 和 Report 引用的目标须在本地完成视图中存在且摘要匹配；本地快照按索引解析。最终归档时所有 run_record 目标须同 Commit 收录或已存在于保留档案中，不能留下只在拥有者本地可解析的小文件引用。清理时保留有效引用目标；仅当引用字段可更新时，才可先转换成删除前 Commit 的 git_file。不可变对象或 Attempt 的冻结字段仍被保留时，其依赖也保留。Attempt 用稳定 ID 关联；审核材料由 review_input_digest 校验，记录并发写入另用完整 Attempt 文件摘要。
 
 ### 执行结论与代码一致性
 
@@ -649,29 +669,29 @@ output_refs 在成果 waiting_gate 前可为空；Attempt 处于 waiting_gate �
 
 ## 输入比较与集成交付
 
-交付以通过检查及人类确认的代码提交进入本地 main 为成功边界；有无 remote 使用相同规则。push/pull 只同步 Git 历史，不参与交付状态，也不要求每次交付先 fetch。同步后合并的新代码不继承原候选的通过结论，需要验证时创建新 Run。
+**一次采纳对应一个 main Commit**，同时包含冻结需求、最终代码、精简档案和 DeliveryRecord。成功边界是该提交进入本地 main；push/pull 仅同步历史。
 
-定义 `project_tree(commit)`：保留该 Commit 的所有被 Git 跟踪的路径、内容和模式，仅移除 `.facetloom/runs/` 子树以及移除后为空的目录。定义、资料和代码均在比较范围内。运行档案不作为项目定义或代码输入；只向执行者和审核者提供明确引用的前驱结果、修复决策或评估证据，不挂载整个档案目录。
+定义 `project_tree(commit)`：保留所有 Git 跟踪路径、内容与模式，仅移除 `.facetloom/runs/` 子树及因此为空的目录。代码、执行定义、资料和已采纳需求均参与基线比较。运行档案仅按显式证据提供，不作为项目输入。
 
 ```text
-最新 main：正式输入 + 各 Run 档案
-                 ↓ 比较 project_tree
-与 source_commit 的正式输入相同？
-    ├── 否 → 新 WorkflowRun
-    └── 是 → 应用有效成果的代码变更，保留最新档案
-                      ↓
-               最终检查 + 人类交付确认
-                      ↓
-               main 代码集成与成功回执（无代码变化只写回执）
+project_tree(main) == project_tree(source_commit)？
+    ├── 否 → 阻塞旧交付，用最新基线创建新 Run
+    └── 是 → 应用有效终端代码 + 写入冻结需求文件
+                          ↓
+                   candidate_tree（不含 runs/）
+                          ↓ 最终检查、人类确认
+             加入精简档案和回执 → 一次 squash 到 main
 ```
 
-1. 所有业务 Combination satisfied 后 Run 为 completed。Runtime 汇聚终端有效输出；冲突阻塞交付，不静默覆盖。
-2. 读取本地 main 最新头；确认无 delivery_abandonment，验证 current 指针和 `project_tree(main) == project_tree(source_commit)`。本地已知需求过期或正式输入不同则拒绝旧运行交付。
-3. 在隔离 Worktree 中把成果相对 source_commit 的代码变更应用到最新 main，保留最新 `.facetloom/runs/`。变化范围仍受既定执行范围约束。
-4. 执行 Workflow 的全部 integration.checks，保存不可变 IntegrationReport。检查可写临时产物，但不能改变被检查的候选输入。
-5. 人类确认固定报告与候选；Git Manager 检查当前头及已有交付。存在代码差异时创建以最新头为唯一父提交的集成 Commit，再追加回执；无差异时只发布 no_change 回执。
+1. 所有业务 Combination satisfied 后 Run 为 completed。汇聚有效终端输出；冲突保留证据并阻塞交付。
+2. 校验需求未被采纳、没有 delivery_abandonment，且最新 main 与 source_commit 的 project_tree 相同。冻结需求的正式路径必须不存在；历史已有采纳时返回既有结果。
+3. 在隔离 Worktree 上应用相对 source_commit 的成果变更，保留最新 main 档案。Worker 的变更仍受执行 Scope 约束；Git Manager 将 requirement_ref 的原始字节写到 `.facetloom/requirements/<requirement-id>.md`，此受信写入独立于 Worker Scope。
+4. 固定 candidate_ref 和 candidate_tree，运行 source_commit 中全部 integration.checks，保存 IntegrationReport。检查可以生成临时文件，不得改写候选的被跟踪内容。
+5. 人类确认具体报告、需求与候选。Git Manager 重验 main 后加入精简档案及 DeliveryRecord，以最新 main 为唯一父提交创建一个 squash Commit，并更新 main。
 
-候选代码用 `candidate_tree` 表示，即候选结果的 project_tree。报告和后续运行记录不参与该 Tree。最终 result_commit 的 project_tree 必须等于报告 candidate_tree，实际完整 Tree 还包含最新档案；不要求整个 Tree 等于执行 Worktree 的旧 Tree。
+`candidate_tree = project_tree(candidate_ref)`，**包含本次需求文件**，因此即使无代码变化也不是空提交。最终采纳提交的 project_tree 必须等于 candidate_tree。档案和回执不参与此 Tree，避免报告或回执引用自身所在 Commit 的循环。
+
+DeliveryRecord.kind 的判定另比较候选在移除本次新需求文件后的 project_tree 与 source_commit：不同为 applied，相同为 no_change。不得排除其它需求或执行定义。两种情况均检查和确认，再提交需求、结论和档案；no_change 不创建额外空代码提交。
 
 ### IntegrationReport
 
@@ -733,11 +753,11 @@ created_at: "2026-11-09T12:00:00Z"
 
 合并冲突时可以保留候选冲突 Tree 的证据，但 candidate_ref / candidate_tree 仍为 null；它不属于可交付候选。未运行的检查记 not_run，无法启动的项记 error；只要存在 error / not_run 就不能报告 passed / failed。全部配置项都未声明时 checks=[] 且 blocked。
 
-检查命令与受信入口来自 source_commit，实际环境、日志和结果进入证据；不能用候选代码改写审核入口。candidate_ref 必须在报告发布前可由 main 历史或自包含 bundle 恢复，报告的 candidate_tree 从恢复出的 Commit 重新计算。
+检查命令与受信入口来自 source_commit，实际环境、日志和结果进入证据；不能用候选代码改写审核入口。candidate_ref 必须在报告本地保存前可由 main 历史或自包含 bundle 恢复，报告的 candidate_tree 从恢复出的 Commit 重新计算。
 
 相同代码候选可重跑最终检查并保存新报告；修改成果需新 Run。新报告不能覆盖旧报告或继承旧报告的人类确认。
 
-main 在检查后只有档案变化时，可在保留最新档案的基础上重新构造完整 Commit；已通过报告及绑定它的确认可以复用。正式输入变化需新 Run；候选、有效成果或所选报告变化时必须重新确认。
+main 在检查后只有 runs/ 变化时，可保留最新档案重构尚未采纳的完整 Commit，复用相同候选与报告的确认。代码、定义或已采纳需求变化要求新 Run；候选、有效成果或报告变化必须重新确认。
 
 ### 交付意图与确认
 
@@ -762,6 +782,13 @@ result_commit: null
 {
   "delivery_id": "<uuid>",
   "run_id": "<run-id>",
+  "requirement_id": "<requirement-id>",
+  "requirement_ref": {
+    "type": "artifact",
+    "uri": "artifacts://sha256/<requirement-digest>",
+    "digest": "sha256:<requirement-digest>",
+    "media_type": "text/markdown"
+  },
   "target_branch": "main",
   "source_commit": "<source-commit-oid>",
   "integration_report_ref": {
@@ -774,7 +801,7 @@ result_commit: null
 }
 ~~~
 
-报告引用包含内容摘要；当前 current 指针、有效终端成果、基线、候选 Tree 和报告必须重新校验。确认不绑定会因档案变化而更新的 main 头，也不允许用旧确认替换报告或候选。
+报告引用包含内容摘要；需求 UUID 未采纳、冻结需求、有效终端成果、基线、候选 Tree 和报告必须重新校验。确认不绑定会因档案变化而更新的 main 头，也不允许用旧确认替换报告或候选。
 
 ```text
 固定报告与候选 → 人类确认并持久化
@@ -782,47 +809,59 @@ result_commit: null
 只有档案变化 → 保留档案，复用确认
 正式输入变化 → blocked，要求新 Run
     ↓
-提交本地 main → 对账结果 → 提交回执
+一次提交需求、代码、档案和回执到 main → 对账结果
 ```
 
-Runtime 串行安排交付，Git Manager 在仓库发布锁下重新读取本地 main，再按 [Services](05-services.md#本地提交生效) 的预期头和工作目录保护规则提交。本地更新结果未知时先对账是否已经成功；未成功且仅档案变化时使用同一 delivery_id 重构尚未生效的提交，不能覆盖并发正式代码。已生效交付即使 push 失败也不回退到 publishing。
+Runtime 串行安排交付，Git Manager 在仓库发布锁下重新读取本地 main，再按 [Services](05-services.md#main-提交保护) 的预期头和工作目录保护规则提交。本地更新结果未知时先对账是否已经成功；未成功且仅档案变化时使用同一 delivery_id 重构尚未生效的提交，不能覆盖并发正式代码。已生效交付即使 push 失败也不回退到 publishing。
 
-重复点击或请求重放返回同一活动意图；已经有成功 DeliveryRecord 或匹配的交付提交时直接返回结果。即使请求带不同 operation_id，也不能为同一 Run 重复交付。同步到档案被精炼删除的状态时，仍通过 Git 历史 Trailer 查已完成交付。
+重复点击或请求重放返回同一活动意图；已经有成功 DeliveryRecord 或匹配的交付提交时直接返回结果。即使请求带不同 operation_id，也不能为同一 Run 或 Requirement 重复交付。同步到档案被精炼删除的状态时，仍通过 Git 历史 Trailer 查已完成交付。
 
 ### DeliveryRecord
 
-一个 Run 最多一次成功交付，DeliveryRecord 为不可变回执。
-
-| kind | 提交与回执 |
-| --- | --- |
-| applied | 候选相对当前正式输入有变化：创建集成 Commit，再用独立档案 Commit 追加回执 |
-| no_change | 候选等于当前正式输入：不创建空代码 Commit，直接提交回执；result_commit 指向已验证的 main 头 |
-
-集成提交和 no_change 回执提交都带 `FacetLoom-Run`、`FacetLoom-Delivery` 与 `FacetLoom-Operation` Trailer。no_change 同样要求最终检查通过及人类确认；它表示没有代码需要应用，不豁免验收。
+DeliveryRecord 是成功采纳的不可变回执，路径为 `deliveries/<delivery-id>.yaml`，**与需求、代码和精简档案同 Commit**。schema_version 为 1，所有 ID 均为 UUIDv4。
 
 ```yaml
 schema_version: 1
 delivery_id: <uuid>
-kind: applied
+operation_id: <operation-id>
+kind: applied                         # applied / no_change
 run_id: <run-id>
-requirement_version_id: REQ-001/r1
+requirement_id: 9e2c1f78-6a54-4d92-8e31-05b7a19c2f60
+requirement_ref:
+  type: artifact
+  uri: artifacts://sha256/<requirement-digest>
+  digest: sha256:<requirement-digest>
+  media_type: text/markdown
 target_branch: main
 integration_report_ref:
   type: run_record
   run_id: <run-id>
   path: reports/<report-id>.yaml
-  digest: sha256:<digest>
+  digest: sha256:<report-digest>
 target_head_before: <actual-parent-commit>
-result_commit: <integration-commit>
-verified_main_commit: <actual-parent-commit>
+candidate_tree: <project-tree-oid>
 confirmation_digest: sha256:<confirmation-digest>
 confirmed_at: "2026-11-06T13:09:00Z"
 applied_by: user:ling
 applied_at: "2026-11-06T13:10:00Z"
 ```
 
-ID 为 UUIDv4，文件名为 deliveries/<delivery-id>.yaml。applied 时 target_head_before 是实际集成父提交；no_change 时 result_commit、target_head_before 与 verified_main_commit 都是回执提交前验证的 main 头。verified_main_commit 是对 current 指针与正式输入做最后校验的 Commit；不要求等于 source_commit 或 Report 记录的早期目标头。applied_by、confirmed_at 来自已持久化的人类确认，confirmation_digest 可用回执及其报告重新计算；applied_at 为回执中登记的 UTC 时间；成功须由 main 可达的集成提交或 no_change 回执确认，不能仅凭本地时间判断。
+回执不保存自身所在提交的 OID。实际采纳提交从 main 可达历史查找以下 Trailer，再验证提交内容和唯一父提交 `target_head_before`；不能仅凭 Trailer 文本或本地时间宣告成功。
 
-applied 的集成提交进入本地 main 后崩溃，通过本地历史 Trailer 找到结果，验证 project_tree(result_commit)=candidate_tree 及已持久化的人类确认，再补回执。no_change 回执本身就是成功记录，按同一 delivery_id 和操作 ID 对账，不再应用代码。无法确认结果或人类确认依据时等待人工处理，不重复交付。已完成交付是否已推送单独展示，不改变成功事实。
+```text
+FacetLoom-Requirement: <requirement-id>
+FacetLoom-Run: <run-id>
+FacetLoom-Delivery: <delivery-id>
+FacetLoom-Operation: <operation-id>
+```
 
-成功后即使 main 又发生代码变化，该 Run 也不再次交付；需要重新应用成果时创建新 Run。所有回执引用的报告、候选和确认依据都受 Refinement 的引用与保留规则约束，不能在补回执期间清理。
+candidate_tree 与报告一致，包含冻结需求文件；confirmation_digest 可由回执身份、报告和固定候选重算，applied_by 和 confirmed_at 来自本地人类确认。applied_at 是提交中记录的 UTC 时间。仅本地交付意图可在成功后填 `result_commit` 作为派生缓存，不再为它追加 main 提交。
+
+| 中断点 | 恢复 |
+| --- | --- |
+| 候选 Commit 仅存在对象库 | 未采纳；校验基线、确认和保护规则后可用原 delivery_id 继续 |
+| main 更新结果未知 | 保持 publishing，先查询 Trailer、需求 UUID 和实际文件；不创建第二个意图 |
+| main 已包含完整采纳提交，本地未记 delivered | 校验 project_tree、冻结需求、档案闭包、同 Commit 回执和确认摘要，再补本地状态；不追加回执提交 |
+| 当前档案被精炼删除或成果被 revert | 查 Git 历史认定已采纳，不重新运行或交付原需求；需要变化时创建新需求 |
+
+成功后即使 main 又发生代码变化，该 Run 也不再次交付；需要重新应用或变更成果时创建新 Requirement。所有回执引用的报告、候选和确认依据都受 Refinement 的引用与保留规则约束，不能在交付结果待对账期间清理。
