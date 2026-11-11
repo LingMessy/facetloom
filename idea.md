@@ -2,7 +2,7 @@
 
 **产品构想与架构动机**
 
-**文档定位：产品目标与后续构想；当前对象和协议以 [Design](design/00-overview.md) 为准。**
+**文档定位：产品目标与后续构想；当前对象和协议以 [Design](design/README.md) 为准。**
 
 > **一句话定义**：一个通过多个 Source Facet 及其内部 Node DAG 从多个维度拆解软件，在派生的 Combination Node DAG 中执行 AI 开发，并通过可配置 Gate 持续进行需求对齐的 Git 原生自动化软件工程系统。
 
@@ -31,7 +31,7 @@ AI 的代码生成能力不断提高，但快速生成 Demo 并不等于长期�
 
 长期可维护的软件工程是产品愿景，但当前核心只覆盖单次 Requirement 的多 Facet 对齐与交付。跨需求、Commit 和 Release 的治理能力留待后续阶段：逐步建立长期追踪与持续检查，再将治理发现转成经人类确认的新 Requirement，交回现有 Workflow 执行。它不扩展成额外的开发 Facet，也不属于当前实现验收范围；上下文引用、检查、Verification、Artifact 和 Gate 在当前阶段只承担单次运行所需的定义、检查与证据闭环。
 
-需求起草默认 AI 辅助，支持随时切换手动模式；默认选择保存在当前 clone，逐需求可覆盖。起草独立选择 runner，AI 整理本地草稿，人类审阅后冻结；起草不要求先选 Workflow。文件与交互规则见 [需求起草](design/02-requirement.md#需求起草)。
+需求起草默认 AI 辅助，支持随时切换手动模式；默认选择保存在当前 clone，逐需求可覆盖。起草独立选择 runner，AI 整理本地草稿，人类审阅后冻结；起草不要求先选 Workflow。文件与交互规则见 [需求起草](design/v1/01-definition.md#需求起草)。
 
 ## 2. 核心概念：理解系统所需的主要对象
 
@@ -118,7 +118,7 @@ start
 
 `Login × Domain` 与 `Notification × Domain` 之间没有依赖，因此可以并行。执行顺序由合并后的 Combination Node DAG 决定；字典序不再是执行规则，最多只能作为同一批就绪节点的稳定展示或调度顺序。
 
-替换积不满足交换律，调换 Facet 顺序可能改变并行与汇聚关系。内层只保留实际节点，最外层保留 start/end；完整算法见 [Workflow](design/01-workflow.md#组合-dag-的生成规则)，顺序影响见 [验证位置对比](design/01-workflow.md#facet-顺序与验证位置)。
+替换积不满足交换律，调换 Facet 顺序可能改变并行与汇聚关系。内层只保留实际节点，最外层保留 start/end；完整算法见 [组合算法](design/v1/02-selection-and-dag.md#组合-dag-的生成规则)，顺序影响见 [验证位置对比](design/v1/02-selection-and-dag.md#facet-顺序与验证位置)。
 
 当多个前置路径在同一个 Combination Node 汇聚时，Runtime 通过 Git Manager 按固定算法形成输入和冲突清单。当前 Attempt 的 Agent 在有效 Scope 内解决代码集成冲突；越界冲突或前驱行为不符合需求时交错误 Gate 处置，不静默修改上游责任。
 
@@ -151,7 +151,7 @@ Combination Facet 在 Workflow 版本内固定。Requirement 启动时创建该 
 
 ### 3.5 定义阶段条件过滤
 
-Workflow 按声明顺序对 Facet DAG 应用节点替换积，先生成完整 Combination DAG，再按节点来源映射应用静态排除。删除中间节点后补齐旁路边，再对整个结果做传递约简，保留相同依赖顺序并去除冗余边。固定后的 DAG 随 WorkflowRun 保存；Requirement 运行时的 Pre-Assess 不改变图结构。
+Workflow 按声明顺序对 Facet DAG 应用节点替换积，先生成完整 Combination DAG，再按节点来源映射应用静态排除。删除中间节点后补齐旁路边，再对整个结果做传递约简，保留相同依赖顺序并去除冗余边。静态图保存为 source-dag；运行前再按需求筛选并固定实际执行图。节点运行时的 Pre-Assess 不改变已采用图。
 
 例如：
 
@@ -159,7 +159,7 @@ Workflow 按声明顺序对 Facet DAG 应用节点替换积，先生成完整 Co
 - `Login × Domain × Accessibility`：一般不需要专门的 UI 无障碍检查；
 - 认证、授权及敏感数据相关组合：需考虑 Security 检查。
 
-静态 exclude 仅按 Facet→Node 来源映射匹配，格式与校验见 [排除规则](design/01-workflow.md#排除规则)。上例是配置时的判断依据，不是运行时 AI 自动删节点的规则。运行时是否适用由 Pre-Assess 留存理由与证据；无法判断进入错误 Gate，不默认跳过验证。
+静态 exclude 仅按 Facet→Node 来源映射匹配，格式与校验见 [排除规则](design/v1/02-selection-and-dag.md#排除规则)。上例是静态配置时的判断依据。运行前另有整体或并发筛选流程，逐组合给出 keep / exclude / defer，采用后按同一桥接与约简算法固定执行图。无法确定时保留节点；之后各节点仍执行 Pre-Assess，核对真实前驱输入和适用性，无法判断则进入错误 Gate。
 
 ### 3.6 Workflow 与 DAG 的激活不变量
 
@@ -232,7 +232,7 @@ Post-Assess 检查是否遗漏相关变更、是否引入其他模块影响。Ga
 
 Gate 持续检查组合成果是否符合人类需求、架构和功能行为。Gate 有 human、ai_assisted、ai、script 四种模式，分别由人类、人类、AI、程序决策。成果项可以并行；执行失败或成果拒绝由 Workflow 错误 Gate 决定重试、上游修复、等待或停止，评估器自身故障交给人类。最终交付仍由人类确认。
 
-每个组合读取完整 Requirement，各 Gate 从所选 Node 的角度审核当前职责内的成果。局部批准不表示整个需求已完成，后续节点负责的工作也不要求在当前节点提前实现；当前约束与必要检查始终有效。示例见 [需求对齐表](design/07-demo.md#同一需求如何从不同角度对齐)。
+每个组合读取完整 Requirement，各 Gate 从所选 Node 的角度审核当前职责内的成果。局部批准不表示整个需求已完成，后续节点负责的工作也不要求在当前节点提前实现；当前约束与必要检查始终有效。示例见 [需求对齐表](design/v1/07-walkthrough.md#同一需求如何从不同角度对齐)。
 
 Requirement 不拥有独立 Gate；Verification Facet 表达节点级验证，最终集成检查验证整体结果。执行与必要检查完成后固定审核输入；Gate 报告属于审核输出，不回写执行证据。补测或修改成果需要新 Attempt，不能复用旧批准。审核定义统一进入 Git，执行与评估的实际初始请求通过持久 Artifact 留存。
 
@@ -362,8 +362,8 @@ Runtime 持久化本地就绪队列、活动 Attempt、Worker/容器引用、重
 ### 最小可验证闭环（MVP）
 
 1. 定义两个 Source Facet，分别含少量只提供上下文的 Facet Node DAG。
-2. 固定生成一个 Combination Facet 及其 Combination Node DAG；Runtime 按 DAG 找到就绪节点并允许无依赖分支并行。
-3. 实现 Combination Worker 的 `Pre-Assess → Agent Execution → 本地 Checkpoint → 各 Node 的 Gate 全部批准`。
+2. 生成静态组合图，经整体或并发筛选并采用后固定执行 DAG；Runtime 调度就绪节点，允许无依赖分支并行。
+3. 实现 Combination Worker 的 `Pre-Assess → Agent Execution → 必要检查与修复 → Checkpoint → Post-Assess → 各 Node Gate`。
 4. Gate 可定向返回上游 Combination Node；修复后重新执行受影响的下游节点。
 5. 每个执行的 Attempt 使用独立 Worktree 和 Rootless Podman 环境；Runtime 持久化执行和 Gate，采纳时归档精简记录到 main。
 6. Workflow 完成后运行集成验证，经人类确认，以一个 squash Commit 保存需求、代码、档案和回执。
@@ -373,11 +373,12 @@ Runtime 持久化本地就绪队列、活动 Attempt、Worker/容器引用、重
 
 | 问题 | 权威定义 |
 | --- | --- |
-| Facet 顺序、组合、排除、上下文与 Scope | [Workflow](design/01-workflow.md) |
-| 运行状态、成果接受与上游修复传播 | [Requirement](design/02-requirement.md) |
-| 适用性、必要检查、代码汇聚与最终交付 | [Execution](design/04-execution.md) |
-| Gate 与运行后的精炼 | [运行治理](design/03-governance.md) |
-| 并发、容器、事务与 clone 协作 | [Services](design/05-services.md) |
+| 需求、执行配置、上下文与 Scope | [需求与执行定义](design/v1/01-definition.md) |
+| Facet 组合、排除与运行前筛选 | [筛选与执行图](design/v1/02-selection-and-dag.md) |
+| 运行对象、Agent 调用、检查与代码汇聚 | [运行与执行](design/v1/03-execution.md) |
+| 成果 Gate、错误处置与恢复上下文 | [审核与恢复](design/v1/04-review-and-recovery.md) |
+| 文件、事务、Artifact、交付与 Git 协作 | [存储与交付](design/v1/05-storage-and-delivery.md) |
+| 用户交互、定义发布与记录精炼 | [交互与运行精炼](design/v1/06-interaction.md) |
 
 精确影响分析、选择性重验证、多用户精细权限及长期治理等扩展统一见 [实现路线](plan.md)。
 

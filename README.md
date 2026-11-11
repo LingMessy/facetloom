@@ -95,7 +95,7 @@ Artifact 默认保留，释放空间须另行人工 purge，先检查完整依�
 
 ## 文档
 
-- [Design](design/00-overview.md)：按 00–07 阅读的实现规范。
+- [Design](design/README.md)：按 00–07 阅读的实现规范。
 - [Plan](plan.md)：实现阶段、依赖与验收条件。
 - [Idea](idea.md)：产品目标、架构动机和长期发展方向，具体协议以 Design 为准。
 
