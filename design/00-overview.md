@@ -43,6 +43,8 @@ FacetLoom 编排外部 Agent，不实现模型推理或工具循环。Podman 镜
 
 需求默认以 AI 辅助模式起草，也可切换手动；模式与独立选择的起草 runner 保存在当前 clone，每个需求可覆盖。AI 仅处理草稿，人类审阅后冻结并决定启动。完整流程见 [需求起草](02-requirement.md#需求起草)。
 
+Workflow 与 Facet 可通过源 DAG 画布和属性面板编辑，直接保存工作区 YAML；Combination DAG 为只读派生预览。定义经人类审阅提交 main 后供新 Run 使用，见 [可视化编辑与发布](01-workflow.md#可视化编辑与发布)。
+
 ## 对象与存储
 
 | 对象 | 作用 | 保存位置 |
@@ -151,6 +153,7 @@ Artifact URI 标识内容，不是下载地址。采纳归档前只要求拥有�
     │   └── frozen.yaml                   # ID 与 requirement_ref 的不可变绑定
     ├── runs/<run-id>/                    # 完整记录与 delivery.yaml 交付意图
     ├── transactions/<operation-id>/       # 事务清单、载荷与提交标记
+    ├── definition-operations/<id>/       # 工作区保存与定义发布恢复日志
     ├── locks/
     ├── worktrees/<attempt-id>/
     ├── workers/<attempt-id>.yaml          # Worker 与停止意图

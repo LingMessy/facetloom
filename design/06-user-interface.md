@@ -26,7 +26,7 @@
 | 页面 | 展示内容 | 人类操作 |
 | --- | --- | --- |
 | Requirement | 起草模式、runner、草稿与 AI Diff、冻结需求、关联 Run、已采纳历史 | 编辑、请求 AI 辅助、切换模式、审阅并冻结、启动 Run；修改冻结需求则创建新 UUID |
-| Workflow | Facet、Scope、校验、DAG 预览 | 审阅定义修改并发布 |
+| Workflow | 源 Facet 编辑器、Scope、校验、组合预览和影响 Diff | 编辑节点/边/属性、保存工作区 YAML、审阅并提交发布 |
 | Run | 本地状态与已采纳档案、结果、问题和证据 | 取消、重试、请求交付或明确放弃未交付成果 |
 | 成果 Gate | 各 Node 的模式、审核要求、报告、主体与汇总状态 | 人工项决策、批量确认、异常接管或请求重评 |
 | 错误 Gate | 错误阶段、材料、处置报告、当前额度及失效范围 | 重试当前节点、修复祖先、等待或停止；异常接管 |
@@ -69,6 +69,44 @@ facetloom requirement freeze <uuid>         # 展示并确认当前正文
 ```
 
 CLI 冻结在确认后提交展示过的摘要；没有人类确认时不自动冻结。CLI 编辑器修改草稿副本，保存时通过同一服务比较原摘要；冲突时保留编辑结果供重新审阅。绕过服务直接编辑 requirement.md 时，应先取消 AI 起草请求；外部文件写入不受 Runtime 锁保护。保存正文、模式切换、取消及冻结的并发规则以 [Requirement](02-requirement.md#需求起草) 为准。
+
+## Workflow 与 Facet 编辑
+
+```text
+Workflow 编辑
+├── Facet 顺序与引用
+├── Source Facet DAG
+│   ├── 节点与属性面板
+│   ├── 边与分支/汇聚
+│   └── Context / Scope / checks / Gate
+├── Exclude 与执行配置
+├── Combination DAG 只读预览
+├── 有效上下文、范围与审核来源
+├── 文件与图 Diff、共享定义影响
+└── 校验 → 保存工作区 → 审阅并发布
+```
+
+画布增删普通节点与依赖，属性面板编辑上下文、Scope、检查和 Gate；拖动位置不改变节点或 Facet 顺序。Workflow 面板单独调整 Facet 顺序。控制节点角色固定，源图删节点后由用户重连；派生 Combination DAG 不可直接编辑。删除或改名展示引用清单，用户修复整个批次后才可保存。
+
+界面区分“未保存编辑”“工作区定义预览”“main 已提交定义”和“Run 固定快照”。未保存编辑可做候选校验；发布前必须保存并重新校验。静态错误定位到文件、字段和源节点，图无效时不显示旧预览为当前结果。正常预览可逐层查看替换积、排除与约简，点击组合查看 members、直接依赖、范围和 Gate 来源。
+
+Diff 将本地 main 与候选对比，显示节点/边及配置变化；共享 Facet 的全部受影响 Workflow 同时列出。审核页明确提示：预览只验证静态定义，不表示需求覆盖或运行成功。文件有外部改动时保留当前编辑，展示外部变更与本次修改，提供重新载入或人工合并入口，不提供强制覆盖。
+
+发布确认显示文件集合、候选摘要及全部受影响图；main 或文件变化后须重新确认。索引有暂存内容或存在无关受跟踪修改时，提示用户先处理；不得把工作区全部修改自动打包。成功显示本地维护 Commit，Git 同步状态单列，不自动运行。协议见 [定义编辑服务](05-services.md#定义编辑服务)。
+
+CLI 使用同一校验与保存服务：
+
+```text
+facetloom workflow validate <workflow-id> [--workspace]
+facetloom workflow preview <workflow-id> [--workspace]
+facetloom workflow impact <workflow-id> [--workspace]
+facetloom workflow save <workflow-id>         # stdin 接收 writes 批次
+facetloom workflow publish <workflow-id>      # 预览、选定文件并人工确认
+```
+
+validate / preview / impact 默认读取本地 main 固定 Commit；`--workspace` 使用工作区。impact 以 main 为比较基线，默认 main 对 main 没有变化；新增 Workflow 仅能用工作区模式，以空图为基线。save 输入格式见 Services，Workflow ID 用于定位入口，实际须检查所有受影响 Workflow；save 不提交，publish 不启动 Run。
+
+新 Run 入口只能选择 main 中已提交且有效的 Workflow；发现未提交定义或引用资料时列出文件，要求提交或恢复。启动后的图只读显示该 Run 固定快照，不能从运行页面直接修改它。
 
 ## DAG 与 Gate
 

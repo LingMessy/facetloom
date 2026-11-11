@@ -83,7 +83,7 @@ Artifact 默认保留，释放空间须另行人工 purge，先检查完整依�
 - 单 clone Runtime 的并行、Checkpoint、本地恢复及不同 clone 的档案协作。
 - 本地 Artifact 持久化、独立交换包导出/导入、缺失材料提示与人工清理保护。
 - 四种 Gate 模式、Node 成果全部批准规则与 Workflow 错误处置；最终集成检查及人类交付确认；Worker 不持有 main 推送凭据。
-- 最小 WebUI / CLI：DAG、Diff、日志、审核、运行精炼。
+- WebUI / CLI：源 Facet DAG 与属性编辑、工作区 YAML 保存、只读组合预览与影响 Diff、定义提交，以及运行日志、审核、运行精炼。
 
 首个场景为“登录失败五次后暂时限制登录，并显示剩余等待时间”。当前仓库以设计文档为主，CLI、WebUI 与上述协议是实现目标；安装和部署方式在实现阶段确定。
 

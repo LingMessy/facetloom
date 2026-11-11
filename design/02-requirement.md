@@ -189,7 +189,7 @@ WorkflowRun 的必需字段如下：
 启动流程：
 
 1. 校验人类确认的冻结绑定；“冻结并启动”先按起草协议确认当前摘要并完成冻结。检查 UUID 未被采纳，再读取本地 main 完整 OID 为 source_commit，无需 remote 或先 fetch。
-2. 校验 Workflow、Facet、必要检查、runner、成果及错误 Gate、评估器和引用资料；拒绝使用运行档案作为定义或资料输入。
+2. 按 [定义保存与生效边界](01-workflow.md#保存与生效边界) 检查工作区和索引中的定义及引用资料，无未提交改动后，只从 source_commit 校验 Workflow、Facet、必要检查、runner、成果及错误 Gate、评估器和资料。拒绝用运行档案作定义输入，也不能将工作区预览直接作为 Run 的图。
 3. 生成并校验 DAG。若显式替代本地未终态 Run，先在旧 Run 锁下持久化替代操作 ID、新 run_id、调度撤销与停止意图，释放锁后再创建新 Run；旧 Run 已停止而新建失败时，以同一操作 ID 幂等重试，不恢复旧执行。不同时持两个 Run 锁。将新 run.yaml、dag.yaml、冻结需求引用及初始状态原子持久化。
 4. 再次校验 main 的正式输入仍匹配 source_commit、需求尚未采纳，然后调度节点。启动不写 main；正式输入变化则阻塞，要求固定新基线的新 Run。
 

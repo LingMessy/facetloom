@@ -7,6 +7,10 @@
 ```mermaid
 flowchart LR
     UI[WebUI / CLI] --> RT[Workflow Runtime]
+    UI --> DE[Definition Editor]
+    DE --> DV[Definition Validator]
+    DE --> GM
+    DE --> YAML[工作区 YAML]
     UI --> RF[Refinement 会话]
     RT --> GM[Git Manager]
     RF --> GM
@@ -26,6 +30,41 @@ flowchart LR
     RT --> Local[(本地持久状态)]
     RF --> Local
 ```
+
+## 定义编辑服务
+
+| 组件 | 职责 |
+| --- | --- |
+| Definition Editor | 源 DAG 与属性编辑、YAML 往返序列化、摘要比较和工作区保存 |
+| Definition Validator | 固定输入解析、引用与图校验、有效配置和影响分析；不执行 Agent 或检查脚本 |
+| Git Manager | 已确认定义的 main 维护提交、索引保护和操作恢复 |
+
+服务供 CLI 与 WebUI 共用，用户流程见 [可视化编辑与发布](01-workflow.md#可视化编辑与发布)。编辑器绑定已检出 main 的工作区，不自动切换分支；其它分支可读取 main 预览，保存与发布须由用户先切回 main。
+
+### 工作区保存协议
+
+保存请求为一批 `writes`，每项含仓库相对 path、before_digest 和完整 UTF-8 content；新增的 before_digest 为 null，删除的 content 为 null。请求来自 UI 缓冲区或 CLI stdin。目标限于 Workflow、Facet、Scope 定义文件；runner、evaluator 和资料可通过文本编辑维护。拒绝越界、重复目标、符号链接以及 `.runtime/`、runs/、Requirement 正文作为目标。
+
+1. 在内存中应用整批候选，校验文件、引用及所有受影响 Workflow。无效时保持磁盘内容，保留编辑缓冲区。
+2. 获取 clone 定义写入锁，复核 HEAD、目标摘要及本轮引用文件摘要；新增路径已存在、外部修改或索引有未合并项时拒绝保存。
+3. 在 `.runtime/definition-operations/<operation-id>/` 保存 kind=save、目标清单、前后摘要、原字节、新载荷及 COMMITTED 标记并 fsync。这是恢复日志，不是独立配置版本。
+4. 各文件在目标目录写临时文件、fsync、再次核对原摘要后原子 rename，并 fsync 父目录；删除只移除摘要匹配的目标。全批完成后写 APPLIED。多文件批次未完成时服务拒绝预览、发布和启动，不消费中间状态。
+5. 崩溃后逐项对账：等于 after_digest 视为完成，等于 before_digest 继续应用，两者都不符则暂停并保留外部内容，交人工协调，不强制覆盖。
+
+保存不改变 Git 索引。目标位于仓库工作区，不能复用仅允许 `.runtime/` 相对路径的运行事务写入器。外部编辑器不服从服务锁，摘要能检测已发生的修改，但不能承诺与任意外部写入原子互斥；保存期间避免同时写同一文件，恢复时再次核对字节。
+
+### 定义发布协议
+
+发布是独立的人类确认维护提交。预览绑定 base_commit、明确文件集合及摘要，展示 Git Diff、全部受影响 Workflow 的源图、组合图和配置变化。集合仅包含用户选择的定义、配置和引用资料，可以包含相应 runner、evaluator、原生配置和资料；不能混入代码成果、Requirement 或运行档案。
+
+候选从 main 加上所选集合构造并重新校验，未选择的工作区修改不能充当依赖。缺少依赖时要求补选或修复，不自动纳入脏文件。main 已检出且有待发布定义修改时，使用以下专用路径：
+
+1. 人类确认 base_commit、文件集合与候选 Tree。索引须干净，受跟踪工作区改动须全部属于发布集合；无关修改先由用户处理。不相关且不会被写入的未跟踪文件保留。
+2. 在 definition-operations 中保存 kind=publish、operation_id、基线、候选和确认。锁顺序为定义写入锁 → 仓库发布锁，不持有 Run 锁。重新检查 main、HEAD、索引和文件摘要，变化则要求刷新确认。
+3. 使用临时索引从确认的字节构造一个普通 Commit，父提交为 base_commit，带 `FacetLoom-Operation` Trailer。持有 Git 索引锁，以预期头比较更新 main，再同步索引为候选 Tree；工作区已是确认内容，不执行 stash、reset 或整树覆盖。
+4. main 更新后索引尚未同步或结果未知时，暂停新 Git 写入，按 Trailer、Commit、Tree 及工作区/索引摘要对账；已发布只完成匹配的索引同步和回执，不重复提交。发现外部改动则保留并交人工协调。发布不自动推送或启动 Run。
+
+这条路径允许提交已审阅的定义改动；最终采纳和 Refinement 仍要求干净工作区。用户直接通过 Git 提交定义同样有效，后续操作校验提交内容。新定义不改写旧 Run，基线变化按现有规则阻塞推进并要求新 Run。恢复日志在实际文件或 main/索引状态确认完成前保留。
 
 ## Workflow Runtime
 
@@ -48,6 +87,7 @@ Runtime 首次使用 clone 时生成 UUIDv4，保存为 `.runtime/identity.yaml`
 ├── requirements/<uuid>/      # requirement.md、drafting.yaml、frozen.yaml
 ├── runs/<run-id>/             # 完整状态、不可变快照与交付意图
 ├── transactions/<operation-id>/ # manifest、payloads、COMMITTED、APPLIED
+├── definition-operations/<id>/ # 工作区保存与定义发布恢复日志
 ├── worktrees/<attempt-id>/    # detached Worktree
 ├── workers/<attempt-id>.yaml  # Worker 身份、停止意图及调用引用
 ├── invocations/<invocation-id>.yaml # 外部调用、原生会话与输入记录
@@ -166,14 +206,14 @@ Git Manager 是唯一执行受信 Git 写入的组件；管理 main、隔离 Wor
 
 ### main 提交保护
 
-以下协议仅用于最终采纳、定义维护和 Refinement：
+以下通用协议用于最终采纳和 Refinement；定义维护使用前述 [定义发布协议](#定义发布协议)，同样遵守预期头保护、操作去重与恢复对账。
 
 1. 先保存本地操作意图。在 detached Worktree 中基于最新 main 构造候选，以当前头为唯一父提交；不混入用户修改，不创建命名执行分支。候选带 `FacetLoom-Operation` Trailer，采纳再带 Requirement、Run、Delivery 标识。
 2. 最终采纳持有 Run 锁后再取仓库写入锁，重查操作、需求采纳历史、确认及基线。预期头变化时先查是否已成功；未成功且只有 runs/ 变化可保留最新档案重构，正式输入变化要求新 Run，不把多个需求的成果自动合并。
-3. main 未检出时以预期旧 OID 比较更新引用；已检出时，只有工作区和索引干净、无将被覆盖的未跟踪文件才正常快进并同步文件。不切换其它分支，不自动 stash、reset 或覆盖用户修改。
+3. main 未检出时以预期旧 OID 比较更新引用；已检出时，最终采纳与 Refinement 要求工作区和索引干净、无将被覆盖的未跟踪文件，才正常快进并同步文件。定义维护按 [定义发布协议](#定义发布协议) 提交已审阅的工作区文件。不切换其它分支，不自动 stash、reset 或覆盖用户修改。
 4. 提交进入 main 的可达历史才成功，候选仅存在对象库不算成功。结果未知时先核对 main、Git 索引和 Trailer，校验需求字节、候选 Tree、档案闭包和同 Commit 回执，再完成本地确认。无法判断工作目录是否完整落地时暂停新 Git 写入，人工处理后恢复。
 
-锁串行化当前 clone 的受信写入，同时使用 Git 引用/索引锁与预期头校验。仅 main 工作目录脏不会阻塞本地执行或 Gate，但会阻塞采纳。重复请求按 operation_id、delivery_id、run_id 和 requirement_id 对账；档案已被精炼删除也查历史，不能重新采纳或复活记录。
+锁串行化当前 clone 的受信写入，同时使用 Git 引用/索引锁与预期头校验。仅 main 工作目录中的普通代码改动不会阻塞本地执行或 Gate，但会阻塞采纳；未提交定义按 Workflow 规则阻止新 Run 启动。重复请求按 operation_id、delivery_id、run_id 和 requirement_id 对账；档案已被精炼删除也查历史，不能重新采纳或复活记录。
 
 ### 取消与并发
 
