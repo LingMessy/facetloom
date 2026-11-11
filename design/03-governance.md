@@ -32,6 +32,10 @@
 
 审核依据是完整 Requirement、当前组合的职责与固定策略。以 `login × domain` 为例，Feature Gate 判断锁定行为是否符合需求，Layer Gate 判断领域规则与依赖边界是否合格；界面提示由后续组合实现，不要求领域组合提前完成。发现当前成果违背需求或无法支持后续工作时仍应指出问题。全部局部 Gate 批准只代表节点成果被接受，整体验收仍须最终集成检查与人类确认。
 
+节点检查的执行与修复流程见 [必要检查与同次修复](04-execution.md#必要检查与同次修复)。进入成果审核后，human、ai_assisted、ai、script 四种模式均可接受包含失败检查的完整成果。作出 Approved 的 GateReport / GateDecision 须在现有 `rationale` 中列明最终 CheckReport 的失败检查 ID，说明失败原因及为何不阻碍当前职责完成和后继执行；不属于本项职责的失败也须说明判断依据。ai_assisted 的建议和人类最终决定分别遵守此要求。
+
+Runtime 校验材料完整性、固定 Tree、引用与输出结构，并要求 rationale 非空；理由是否充分由配置的决策主体负责，不通过关键词推断。批准不会把 CheckReport 的 failed 改成 passed，也不产生额外豁免对象或“允许失败”开关。error / not_run、必要材料未形成或缺失时不能批准；补齐原证据与错误处置遵循下文规则。
+
 ```mermaid
 flowchart LR
     A[Attempt 的固定上下文、输出与证据] --> H[feature/login: human]

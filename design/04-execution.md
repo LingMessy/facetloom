@@ -304,6 +304,16 @@ created_at: "2026-11-09T12:00:00Z"
 
 ## 必要检查与同次修复
 
+三类检查分别回答不同问题：
+
+| 检查 | 执行与记录 | 对接受或交付的作用 |
+| --- | --- | --- |
+| 节点必要检查 | Runtime 检查当前候选，写入 CheckReport | 必须完整执行；失败证据可由成果 Gate 按当前节点职责判断 |
+| Gate 审核检查 | 评估器检查固定成果，写入 GateReport | 支持本项审核决定，不补写或替换 Attempt 的冻结材料 |
+| 最终集成检查 | Runtime 检查完整交付候选，写入 IntegrationReport | 非空 integration.checks 必须全部通过，才允许请求人类交付确认 |
+
+“必要”指必须执行并形成完整证据，不表示每项失败都自动拒绝节点成果。成果接受规则见 [成果 Gate](03-governance.md#gate-模式与职责)；检查事实与审核决定分别保留。
+
 Runtime 从 Workflow 和选中 Node 累积必要检查，将限定 ID、argv、超时、来源、环境和 max_check_retries 固定到 Snapshot。检查程序由 Runtime 在独立候选副本中运行，不依赖外部 Agent 自己执行或汇报。检查由 Runtime 调度并记录真实退出结果，Worker 自报通过不能替代检查记录。命令配置来自 source_commit；受信检查入口脚本从该 Commit 提供，不能被候选代码替换。被检查的实现和测试内容来自本轮候选 Tree。
 
 ```text
@@ -314,8 +324,10 @@ Agent 执行 / 解决冲突
     ├── 检查失败、任务适用且还有额度 → 同一 Worker 修复 → 全量重检
     ├── 检查失败且任务不适用 → 保留失败报告 → Post-Assess → 成果 Gate
     ├── 额度耗尽且证据完整 → 最终 Checkpoint → 独立只读 Post-Assess → 成果 Gate
-    └── 无法执行或材料缺失 → ErrorRecord → 错误 Gate
+    └── 无法执行或必要证据未形成 / 不可恢复 → ErrorRecord → 错误 Gate
 ```
+
+仅当前 clone 缺少已形成证据的副本时，暂停依赖该材料的操作并补齐原引用内容；不伪造失败结果，也不重新生成冻结证据。
 
 - 默认先检查一次，失败后最多修复并重检 2 次；max_check_retries=0 时首轮之后直接提交完整结果。
 - 每轮按有效列表顺序执行全部检查，不因测试失败跳过其余项；命令无法启动等执行错误可中止该轮，其余项记 not_run。每项记录 check_id、round（从 1 开始）、evaluated_tree、passed / failed、退出码或 timeout、证据引用及使用环境。
@@ -324,7 +336,7 @@ Agent 执行 / 解决冲突
 - 任务适用且检查失败时，Adapter 续接执行会话反馈，外部 Agent 自行修复；每次续接先返回新的 ExecutionResult。无法安全续接则报错转错误 Gate，不在 Runtime 内实现模型/工具循环。不适用时没有执行会话，不启动修复；检查结果完整即交成果 Gate。修复轮次用尽后只允许对最终已检查 Tree 生成正式 Checkpoint；代码再变化必须新 Attempt。零项检查记录空清单，不能虚称有测试通过。
 - 每轮日志保存在 Artifact；精简档案保留最终 Tree、有效检查结论、修复次数及各轮证据引用。最终 Checkpoint Tree 必须等于最后一轮 evaluated_tree。
 
-检查修复预算只约束当前 Worker；错误 Gate 创建新 Attempt 或安排上游修复使用独立的 Run 级自动恢复额度。最终 integration.checks 仍须全部通过才可交付。
+检查修复预算只约束当前 Worker；错误 Gate 创建新 Attempt 或安排上游修复使用独立的 Run 级自动恢复额度。最终交付条件见 [IntegrationReport](#integrationreport)。
 
 ### Post-Assess
 
@@ -378,7 +390,7 @@ created_at: "2026-11-09T12:00:00Z"
 | context_snapshot_ref | 包含完整有效检查清单和环境的 Snapshot |
 | max_check_retries、repairs_used | 固定预算与已使用修复次数 |
 | rounds | 按 round 升序记录候选 Tree 与各项执行结果 |
-| status | passed / failed / error；error 表示无法形成完整最终检查结论 |
+| status | passed / failed / error；error 表示无法形成完整的节点最后一轮检查结论 |
 | final_round | passed / failed 时必填，指向完整最终轮次；error 时 null |
 | reason、created_at | failed / error 的原因，以及 UTC 时间 |
 
@@ -679,7 +691,7 @@ project_tree(main) == project_tree(source_commit)？
     └── 是 → 应用有效终端代码 + 写入冻结需求文件
                           ↓
                    candidate_tree（不含 runs/）
-                          ↓ 最终检查、人类确认
+                          ↓ 最终集成检查、人类确认
              加入精简档案和回执 → 一次 squash 到 main
 ```
 
@@ -753,9 +765,11 @@ created_at: "2026-11-09T12:00:00Z"
 
 合并冲突时可以保留候选冲突 Tree 的证据，但 candidate_ref / candidate_tree 仍为 null；它不属于可交付候选。未运行的检查记 not_run，无法启动的项记 error；只要存在 error / not_run 就不能报告 passed / failed。全部配置项都未声明时 checks=[] 且 blocked。
 
+节点全部被接受只表示 Run 执行完成，不代表集成检查通过。IntegrationReport 为 failed / blocked 时不能交付；节点 Gate 的批准与人类交付确认都不能豁免最终集成检查。
+
 检查命令与受信入口来自 source_commit，实际环境、日志和结果进入证据；不能用候选代码改写审核入口。candidate_ref 必须在报告本地保存前可由 main 历史或自包含 bundle 恢复，报告的 candidate_tree 从恢复出的 Commit 重新计算。
 
-相同代码候选可重跑最终检查并保存新报告；修改成果需新 Run。新报告不能覆盖旧报告或继承旧报告的人类确认。
+相同代码候选可重跑最终集成检查并保存新报告；修改成果需新 Run。新报告不能覆盖旧报告或继承旧报告的人类确认。
 
 main 在检查后只有 runs/ 变化时，可保留最新档案重构尚未采纳的完整 Commit，复用相同候选与报告的确认。代码、定义或已采纳需求变化要求新 Run；候选、有效成果或报告变化必须重新确认。
 

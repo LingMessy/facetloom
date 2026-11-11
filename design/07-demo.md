@@ -159,6 +159,20 @@ execution:
 
 同名 `feature/login` 在不同 Combination / Attempt 中独立审核，不能沿用上一节点的批准。脚本正常返回 Rejected 表示成果不符合要求；脚本超时或退出失败则是评估故障，等待人类处理，其他独立项仍可继续。
 
+### 节点检查失败仍可接受的例子
+
+假设 `workflow/unit` 包含领域与接口测试。`login × domain` 完成领域规则后，检查已完整执行且同次修复额度耗尽：领域测试通过，接口测试因后续 application 节点尚未接入剩余时间而失败。两个 Gate 分别审核固定证据，可以批准，也可以因领域输出不足而拒绝；不能只因“后续会处理”自动接受。
+
+批准时的 `rationale` 示例：
+
+```text
+workflow/unit 失败：登录接口尚未返回 remaining_seconds。
+报告中的领域测试及当前 Diff 已验证锁定期限和剩余时间计算；
+接口接入属于后继 application 节点，当前领域输出足以支持该工作，故接受。
+```
+
+全部 Gate 批准后节点为 accepted / satisfied，但 CheckReport 仍为 failed。若命令未启动或证据未形成，不能使用上述理由批准。后续节点完成后仍须对最终候选执行 integration.checks；节点批准不能替代最终集成通过。
+
 ## 从运行到交付
 
 准备定义时，可在可视化编辑器中配置 Feature / Layer 的源节点与依赖，并保存到工作区 YAML。预览应产生上文的分支与汇聚；改变 Facet 顺序、Scope 或 exclude 时先看图与配置 Diff。人类确认发布一个定义维护提交后，新 Run 才读取这些定义。这一准备提交独立于后续 Requirement 的一次 squash 采纳。
@@ -382,7 +396,11 @@ Git 外的独立交换文件
 | Scope 交集为空 | 只读；读取受 Runtime 策略限制，需要修改报错 |
 | Workflow 与 Node 声明同名检查 | 限定 ID 不冲突；检查累积，不能覆盖或移除 |
 | 检查失败并修复代码 | 默认最多 2 次修复；每次变更后全量重检，旧通过结果不复用 |
-| 最终检查失败但证据完整 / 命令无法启动 | 前者进入成果 Gate，后者进入错误 Gate |
+| 节点最后一轮检查失败、修复额度耗尽且证据完整 / 命令无法启动 | 前者进入成果 Gate，后者进入错误 Gate |
+| 四种成果 Gate 模式审核完整失败证据 | 均可按职责批准或拒绝；批准理由列明失败检查 ID 及不阻碍当前职责和后继的依据 |
+| 检查失败获批 / 仅部分 Gate 批准 | 前者保留 failed 检查事实；后者不接受节点、不解锁后继 |
+| Gate 自行运行审核检查 | 结果只进入 GateReport，不补写冻结的 CheckReport 或 output_refs |
+| 零项节点检查 | 记录空清单，界面显示“未配置检查”，不声称测试通过 |
 | preparing 阶段失败 | Attempt failed，输入和 Snapshot 可空，仍有不可变 ErrorRecord |
 | 四种错误 Gate 模式 | 复用模式和主体规则，输出动作而非成果批准 |
 | 错误决定允许重试或修复 | 本地事务后新建 Attempt，不能直接 satisfied；旧终态保留 |
@@ -399,7 +417,8 @@ Git 外的独立交换文件
 | 最终 CheckReport 对应旧 Tree 或缺项 | 拒绝成果材料冻结；旧通过不能证明新代码 |
 | no_change / not_applicable 仍修改代码或留下冲突 | 与代码条件不符，不能接受成果 |
 | 最终汇聚失败尚无完整候选 | IntegrationReport blocked，candidate_ref / candidate_tree 为 null，保留冲突证据 |
-| 最终检查未启动 / 测试执行失败 | 分别为 blocked / failed；未运行项不能当作通过 |
+| 最终集成检查未启动 / 测试执行失败 | 分别为 blocked / failed；未运行项不能当作通过 |
+| 所有节点已接受，但最终集成检查失败或未配置 | 仍不能交付；节点批准和人类确认不能豁免集成检查 |
 | 检查后候选或所选报告变化 | 旧确认失效；对新报告与候选重新确认 |
 | 确认后只有 runs/ 档案变化 | 保留最新档案，允许复用原确认；源码变化则要求新 Run |
 | 连续点击交付、不同 operation_id、本地提交确认丢失 | 同一需求 / Run 复用交付意图与 delivery_id，对账后返回一次成功结果 |
