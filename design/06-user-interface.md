@@ -167,6 +167,8 @@ Workflow 错误 Gate：human / ai_assisted / ai / script
 
 同时展示 `检查修复：已用 / max_check_retries` 与 `自动恢复：auto_recoveries_used / max_auto_recoveries`，前者属于 Attempt，后者属于整个 Run。每轮通过 CheckReport 显示 Tree、全部检查结果及证据；error / not_run 与 failed 分开显示，代码变化后旧通过结果标为历史，不能代表新 Tree。
 
+恢复 Attempt 页面分别展示当前 input_commit、recovery_decision_ref、上一 Attempt 和只读旧成果差异，以及仍需遵守的修复要求。旧输入或输出不存在时显示“未形成”，原材料缺少本地副本时显示导入入口。明确说明 Agent 在当前输入上重新应用合适改动，旧成果未被自动合入，旧批准与检查结果也不继承；修复目标和后继均须重新检查与审核。
+
 处置提交绑定 error_ref、错误策略与审核摘要、所属节点或 Run 的文件摘要、前一决定；服务再次校验额度、Run 和修复范围。自动额度耗尽或错误评估器故障时提供人工接管，禁止自动循环重评。wait 后可以引用原错误作出新决定；已安排恢复或已经失效的错误不能重复执行。
 
 外部 Agent 的免审批参数属于运行配置，不作为 Gate 审核或人类确认。所有审核与处置显示“本地保存中 / 本地已生效”，恢复动作在决定与关联状态事务落地后启动。执行与 Gate 不提交 main，Git 同步仅针对已采纳或维护提交。

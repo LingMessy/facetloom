@@ -66,6 +66,7 @@ input_commit: <full-commit-oid>
 direct_predecessors: []
 input_merge_ref: null                 # 多前驱时引用汇聚清单 Artifact
 merge_conflicts: []
+recovery_context: null               # 普通首次执行无恢复上下文
 context:
   objectives: [实现登录失败限制领域规则]
   source_paths:
@@ -132,7 +133,7 @@ execution:
 | Node 与 Scope | 按 DAG members 解析；write_scope.all_of 保留每组路径与来源，禁止把交集压平成路径并集 |
 | 前驱输入 | direct_predecessors 各项固定 combination_id、attempt_id、output_commit |
 | 执行环境 | 引用 Run.runners 中的固定调用配置及摘要，记录独立读写范围、资源限制、检查环境、检查列表与预算；凭据只记录用途 |
-| 修复要求 | 记录错误处置授权的修复/补测指令及原错误、报告和决定引用；失败代码不自动成为新输入 |
+| 修复要求 | recovery_context 引用授权决定、上一 Attempt 与必要证据；指令从决定解析，旧代码仅作参考；规则见下节 |
 | Gate 策略 | gates 按 Facet 声明顺序列出每个选中 Node 的 gate_id、完整有效 policy 与 policy_digest；缺项、重复项或来源不匹配时拒绝启动 |
 
 `execution.write_scope.all_of` 按 Facet 顺序保留有 Scope 的 Node，最后一组为 Runtime 写入策略；无 Scope 的 Node 不增加组。某路径只有同时匹配每组 paths 中至少一条规则才允许写入；组内 paths 为空即拒绝全部写入。Scope 不允许写入的定义、资料及运行档案仍由 Runtime 固定规则保护。read_paths 独立生效。
@@ -144,6 +145,56 @@ execution:
 runner 包含镜像、原生参数与配置，FacetLoom 不重建外部 Agent 的模型或工具系统。本地仅提供凭据、连接和资源上限；无法满足执行配置进入错误 Gate，评估器故障人工接管。check_environment 与 Agent 调用分开，默认使用执行 runner 的镜像并禁网；需要网络等额外检查环境时必须显式固定在 Workflow.execution.check_environment，不根据 Agent 的联网配置自动放宽检查。
 
 `policy_digest` 对 policy 按 RFC 8785（JCS）规范化后的 UTF-8 JSON 字节求 SHA-256；仅允许该规范支持的 JSON 值。Decision / GateReport 的 gate_policy_digest 必须等于对应项摘要。Snapshot 文件名仍对完整 YAML 文件字节求摘要。任务输入变化需要新 Snapshot 与新 Attempt；Workflow、Node 或评估器定义变化需要新 Run。
+
+### 恢复上下文与旧成果
+
+新 Attempt 的工作代码仍从根基线或当前有效前驱生成。Runtime 将旧实现作为只读参考交给 Agent，由 Agent 在当前输入上重新应用合适的改动；不自动 checkout、cherry-pick 或合并旧节点输出。旧检查结果与 Gate 批准不继承。
+
+| 字段 | 定义 |
+| --- | --- |
+| Attempt.recovery_decision_ref | 触发本次执行的 GateDecision 类型化引用；普通首次执行为 null，恢复及受影响后继重执行时必填，创建后不变 |
+| Snapshot.recovery_context | 普通首次执行为 null；需传递恢复材料时保存下列三个字段 |
+| decision_refs | 当前仍需遵守的恢复决定引用，按 Runtime 授权落地顺序去重；修复指令从决定解析，不复制正文 |
+| prior_attempt_ref | 本节点被替代的上一 Attempt 的 run_record 引用；尚无旧 Attempt 时为 null |
+| evidence_refs | 本次所需的 ErrorRecord、失败报告、相关旧成果等类型化引用；旧输入与输出可经 prior_attempt_ref 解析，用于查看差异 |
+
+恢复 Snapshot 的字段片段：
+
+```yaml
+recovery_context:
+  decision_refs:
+    - type: run_record
+      run_id: <run-id>
+      path: decisions/<decision-id>.yaml
+      digest: sha256:<decision-digest>
+  prior_attempt_ref:
+    type: run_record
+    run_id: <run-id>
+    path: attempts/<prior-attempt-id>.yaml
+    digest: sha256:<prior-attempt-digest>
+  evidence_refs:
+    - type: run_record
+      run_id: <run-id>
+      path: errors/<error-id>.yaml
+      digest: sha256:<error-digest>
+```
+
+恢复事务在清除有效成果引用前，将各受影响节点的旧 Attempt 身份、已固定的输入/输出引用及继承的恢复要求写入现有恢复操作意图，与决定、额度和失效范围一起保存。准备新 Snapshot 只读取这组固定来源，不重新查询“最近一次运行”。旧 Attempt 尚在执行时先撤销并停止或隔离，终态落地后才固定其 run_record 摘要；新 Attempt 不引用仍会变化的记录。无旧输入或输出时明确标为未形成，不使用遗留工作目录拼出旧成果。
+
+decision_refs 保留上一轮尚未完成的恢复要求，再追加本次决定；本节点的新成果被接受前，不因再次失败、取消或换一个恢复动作而丢弃要求。已完成的旧指令通过历史引用追溯，不自动当作新任务；新授权不得静默覆盖旧约束。受影响后继结合自身职责执行修复后的重新对齐，不机械照搬目标节点的任务。材料不足或指令冲突按现有 preparation 错误流程处理，仅缺原材料副本时先补齐。
+
+仅恢复固定外部引用可用性的 retry_current 继续复用原 Snapshot：本次决定只记录在新 Attempt.recovery_decision_ref，原 recovery_context 保持不变，不新增指令。其他改变任务要求或加入恢复材料的情况生成新 Snapshot；普通恢复的 decision_refs 包含本次 recovery_decision_ref。拒绝后的 retry_current 从 ErrorRecord 及其成果拒绝决定解析原因，不把 rationale 当作可扩展需求或 Scope 的授权。
+
+实际 Agent 请求按以下结构明确区分材料，并通过 agent_input_ref 留存：
+
+```text
+当前工作代码   → 新 input_commit，可在有效 Scope 内修改
+旧成果参考     → 上一 Attempt、旧输入/输出与差异，只读
+失败原因       → ErrorRecord、节点或集成失败报告
+授权修复要求   → recovery_decision_ref 与 recovery_context.decision_refs 中的决定
+```
+
+Adapter 将解析出的必要引用加入本次证据白名单；不存在的旧输出显示“未形成”，不能声称已提供。差异由固定旧输入与输出计算；若作为独立文件交给 Agent，则先保存为 Artifact 并记录引用。所有恢复引用参与既有可读性、摘要校验、Artifact 保护、导出及归档依赖闭包，不改写旧报告或历史 Attempt。
 
 ## 前驱代码汇聚
 

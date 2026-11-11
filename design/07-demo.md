@@ -430,7 +430,15 @@ Git 外的独立交换文件
 
 ## 集成恢复的专项验收
 
-例：最终回归发现登录接口缺少剩余时间，错误 Gate 选择 `repair_combination`，目标为 `login × application`。application 与其后继 presentation 的有效成果失效，domain、data 和 notification 分支保持有效。新 Attempt 引用失败报告及旧成果作为参考，仍从当前有效前驱构造输入；修复并重新通过全部节点 Gate 后全量集成，报告通过才 completed。
+例：最终回归发现登录接口缺少剩余时间，错误 Gate 选择 `repair_combination`，目标为 `login × application`。application 与其后继 presentation 的有效成果失效，domain、data 和 notification 分支保持有效。恢复事务先固定两个节点各自的旧 Attempt 和成果引用，新 Attempt 的 recovery_decision_ref 均指向本次决定。
+
+| 节点 | 当前工作代码 | 旧成果参考与修复职责 |
+| --- | --- | --- |
+| application | 有效 domain 输出 | 读取自身旧实现、失败集成报告和决定，在当前输入上重新应用接口实现并修正剩余时间返回 |
+| presentation | 新 application 与保留的 data 输出汇聚 | 读取自身旧界面实现，按新接口重新对齐，不直接合入旧 presentation 输出 |
+| data | 原有效成果 | 不失效、不重执行，不创建新的恢复 Attempt |
+
+两个新 Attempt 的 Snapshot.recovery_context 分别引用自身上一 Attempt 和所需证据；检查及全部成果 Gate 重做，随后全量集成，报告通过才 completed。
 
 | 场景 | 预期结果 |
 | --- | --- |
@@ -446,6 +454,21 @@ Git 外的独立交换文件
 | 集成中取消、旧报告迟到、终端成果或基线已变化 | 旧任务不能将 Run 置 completed；新任务开始前停止或隔离旧进程 |
 | 只有原材料副本缺失 | 补齐原内容后恢复未完成操作；不伪造检查失败或自动重新执行已结束检查 |
 | completed 后交付或请求重检 | 交付使用绑定成功报告，不自动重检；修改或重新验证须新 Run |
+
+## 恢复上下文的专项验收
+
+| 场景 | 预期结果 |
+| --- | --- |
+| 普通首次执行 | recovery_decision_ref 与 recovery_context 均为 null |
+| 成果拒绝后 retry_current | 新 Attempt 固定恢复决定，新 Snapshot 引用旧 Attempt、ErrorRecord 和拒绝依据；旧代码只读，不继承批准 |
+| repair_upstream / repair_combination | 失效前固定每个受影响节点的旧来源；后继关联同一触发决定，但使用自身旧成果和当前有效前驱 |
+| 修复 Attempt 再次失败并恢复 | 尚未完成的授权要求保留，决定按授权顺序去重；新决定不静默覆盖旧约束 |
+| 准备失败，尚无 Snapshot、输入或输出 | 只提供已形成的错误与决定；界面和请求明确缺项，不从工作目录残留拼出成果 |
+| 固定外部引用恢复后的 retry_current | 复用原 Snapshot；仅新 Attempt 保存新的 recovery_decision_ref，不添加指令 |
+| 恢复材料缺少副本 / 指令冲突 | 分别补齐原引用内容 / 按准备错误处理，不能无声丢弃旧要求 |
+| 清除有效成果后崩溃并重放 | 从已提交恢复意图读取固定来源，不重新选取“最新”旧成果、不重复扣减预算 |
+| 旧 Attempt 仍有活动进程 | 先撤销并停止或隔离，终态落地后固定摘要；新 Snapshot 不引用可变记录 |
+| 恢复材料导出、归档与清理 | 包含决定、旧 Attempt、错误和代码恢复材料的依赖闭包；有效引用阻止清理 |
 
 ## 一次采纳的专项验收
 

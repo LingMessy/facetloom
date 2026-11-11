@@ -84,6 +84,7 @@ CLI 随各阶段提供可操作的验证入口。每阶段完成验收后进入�
 
 - 验证 Run 的 running → integrating → completed，以及集成错误的 blocked → running / integrating；ErrorRecord 按 scope 定位对象，集成恢复不创建虚假 Attempt。
 - 集成冲突、检查失败和环境错误均经四种错误 Gate 模式处置；修复目标及后继重执行和审核，无关成果保留。重检与修复共用 Run 的自动预算；迟到报告、取消、重复决定和崩溃重放不能重复推进或扣减。
+- 恢复 Attempt 固定 recovery_decision_ref；失效事务先保存旧来源，Snapshot.recovery_context 引用决定、上一 Attempt 和证据。Agent 在当前 DAG 输入上参考旧成果，不自动迁移代码。连续恢复保留未完成要求，固定引用恢复可复用原 Snapshot；无旧输出、材料缺失、指令冲突及崩溃重放均有明确结果，恢复引用纳入导出与清理保护。
 - completed 绑定成功候选与报告；交付不重新检查，也不能替换绑定。基线变化要求新 Run，缺少原材料时补齐，提交结果未知先对账。
 - 通过 CLI 跑通登录限制 Demo：分支并行、汇聚等待全部前驱、冲突处理、审核和最终交付。
 - 事务提交前后崩溃、外部调用未知、本地 main 更新失败和重复操作不丢记录、不重复扣减恢复额度、不重复接受或交付；已生效结果不因 push 失败而回退。仅同步 Git 时明确标记缺失 Artifact，经现有渠道传递并导入独立交换包后，可从其中 Git bundle 恢复代码，不接管活动运行。

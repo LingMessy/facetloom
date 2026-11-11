@@ -33,7 +33,7 @@ flowchart LR
 | Combination Node | 多个 Facet Node 的成员映射及依赖；生成后固定在本次 Run 的 DAG Snapshot 中 |
 | CombinationRun | 当前组合的状态与有效成果引用；同一 WorkflowRun 中每个业务组合一条 |
 | Attempt | 一次准备、执行、检查和审核尝试；可含多次外部调用，准备失败时可以尚无 Worker 或成果 |
-| GateDecision | 对某个 Attempt 的固定成果或错误材料作出的决定；纯人工模式无需先有 GateReport |
+| GateDecision | 对 Attempt 成果、节点错误或 Run 级集成错误作出的决定；纯人工模式无需先有 GateReport |
 
 错误 Gate 安排重试、上游修复或冻结后补测时创建新 Attempt；预算内修复与重检仍属于同一 Attempt。新 Attempt 不继承旧批准；单纯重评已有冻结材料不创建 Attempt。全部 CombinationRun 满足后，还需通过最终集成检查、形成 IntegrationReport，并由人类确认交付。
 
@@ -429,7 +429,7 @@ updated_at: "2026-11-09T12:00:00Z"
 
 节点错误的 repair_upstream 目标只能是当前节点的祖先；当前节点重试使用 retry_current。集成错误的 repair_combination 可选同 Run 的任一业务节点；动作协议见 [错误 Gate](03-governance.md#错误评估协议与决定)。Runtime 原子清除修复目标和全部可达后继的有效成果引用，持久化停止意图，拒收迟到任务结果；无依赖分支继续。目标在其前驱满足后 pending，后继依次等待新成果。历史 accepted、rejected 和 failed Attempt 不改写。
 
-每个新 Attempt 仍按根基线或当前有效前驱构造输入；失败或拒绝的代码仅作显式证据，不自动成为输入。新的或变化的任务指令进入新 Context Snapshot，并包含处置决定、修复要求与原错误引用；只有在输入内容完全相同时才可复用 Snapshot，且新 Attempt 的全部成果 Gate 仍须重新审核。
+每个新 Attempt 仍按根基线或当前有效前驱构造输入；旧成果仅作只读参考，不自动成为输入。触发决定固定在 recovery_decision_ref，修复材料进入 Snapshot.recovery_context，具体字段、旧成果选取及连续恢复规则见 [恢复上下文与旧成果](04-execution.md#恢复上下文与旧成果)。新 Attempt 的全部成果 Gate 仍须重新审核。
 
 `wait` 仅适用于 Pre-Assess 已确认的固定外部引用暂时不可读取。等待期间 Run 与 CombinationRun 保持 blocked，原 Attempt、ErrorRecord 和 Context Snapshot 不变；Runtime 不自动轮询或重发调用。引用恢复可读后，用户显式请求重新处置同一 ErrorRecord；错误 Gate 按固定模式重新评估并生成决定。决定为 `retry_current` 时，新 Attempt 复用原 Snapshot 并重新运行 Pre-Assess。
 
@@ -480,6 +480,7 @@ accepted、rejected、failed、cancelled 为终态，不因错误处置重新打
 | --- | --- | --- |
 | schema_version、attempt_id | 是 | 格式为 1，ID 为 UUIDv4 |
 | run_id、combination_id、attempt_number | 是 | 所属节点与本节点递增序号 |
+| recovery_decision_ref | 是 | 触发本次执行的 GateDecision 类型化引用；普通首次执行为 null，恢复及受影响后继重执行时必填；创建后不变 |
 | context_snapshot_ref | 条件 | preparing 时可空；准备成功时固定为 contexts/<sha256>.yaml，按字节摘要校验 |
 | input_commit | 条件 | 与 context_snapshot_ref 一起设置一次，必须等于 Snapshot.input_commit，随后不可变 |
 | agent_input_ref | 条件 | 初始请求形成后设置一次，发送前固定；未形成请求可空 |
@@ -501,6 +502,7 @@ attempt_id: <uuid>
 run_id: <run-id>
 combination_id: development/feature:login/layer:domain
 attempt_number: 1
+recovery_decision_ref: null
 status: preparing
 context_snapshot_ref: null
 input_commit: null
