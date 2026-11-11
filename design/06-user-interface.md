@@ -30,7 +30,7 @@
 | Run | 本地状态与已采纳档案、结果、问题和证据 | 取消、重试、请求交付或明确放弃未交付成果 |
 | 成果 Gate | 各 Node 的模式、审核要求、报告、主体与汇总状态 | 人工项决策、批量确认、异常接管或请求重评 |
 | 错误 Gate | 错误阶段、材料、处置报告、当前额度及失效范围 | 重试当前节点、修复祖先、等待或停止；异常接管 |
-| Delivery | 固定候选、最终报告、绑定确认、交付意图与成功回执 | 确认交付、重跑最终检查、查看或恢复待对账操作 |
+| Delivery | completed Run 的固定候选、成功 IntegrationReport、绑定确认、交付意图与成功回执 | 确认交付、查看交付对账；集成重检或节点修复从错误 Gate 进入 |
 | Refinement | 已结束运行、筛选项、建议、拟修改和删除内容 | 采纳、暂留、丢弃、确认提交 |
 | Artifacts | 当前 clone 的内容可用性、依赖、占用及导入/清理回执 | 检查缺失、导出交换包、导入、预览并确认本地 purge |
 | Local Runtime | runner、Worker、容器、原生调用、本地事务与交付意图、同步与恢复 | 停止 Worker、恢复本地运行 |
@@ -106,7 +106,7 @@ facetloom workflow publish <workflow-id>      # 预览、选定文件并人工�
 
 validate / preview / impact 默认读取本地 main 固定 Commit；`--workspace` 使用工作区。impact 以 main 为比较基线，默认 main 对 main 没有变化；新增 Workflow 仅能用工作区模式，以空图为基线。save 输入格式见 Services，Workflow ID 用于定位入口，实际须检查所有受影响 Workflow；save 不提交，publish 不启动 Run。
 
-新 Run 入口只能选择 main 中已提交且有效的 Workflow；发现未提交定义或引用资料时列出文件，要求提交或恢复。启动后的图只读显示该 Run 固定快照，不能从运行页面直接修改它。
+新 Run 入口只能选择 main 中已提交且有效的 Workflow，并要求非空 integration.checks；工作区草稿缺少集成检查时可以保存和预览，但显示不可运行并阻止发布与启动。发现未提交定义或引用资料时列出文件，要求提交或恢复。启动后的图只读显示该 Run 固定快照，不能从运行页面直接修改它。
 
 ## DAG 与 Gate
 
@@ -124,7 +124,7 @@ flowchart LR
 
 调用详情列出 Agent 提交的证据相对路径、导入状态、Artifact 摘要和可打开的持久引用。校验失败时显示失败路径与原因，明确标记整份调用结果未发布；不展示可供后续引用的部分导入结果。Gate AI 和 Refinement 的证据使用同一视图，Script Gate 只显示其返回且通过校验的类型化引用。
 
-汇聚节点列出未满足前驱、实际合并顺序、来源、共同祖先与冲突清单；preparing 显示输入尚未形成，blocked、stale 和 cancelled 显示原因。运行页分别显示「运行完成」「待交付」「已交付」。
+汇聚节点列出未满足前驱、实际合并顺序、来源、共同祖先与冲突清单；preparing 显示输入尚未形成，blocked、stale 和 cancelled 显示原因。运行页分别显示「节点执行完成 / 集成中」「运行完成 / 待交付」「已交付」；集成失败显示 IntegrationReport、ErrorRecord 和错误 Gate，不显示为 completed。
 
 Gate 页面固定显示：
 
@@ -163,11 +163,11 @@ Workflow 错误 Gate：human / ai_assisted / ai / script
     └── 停止 → 取消 Run
 ~~~
 
-错误页以 ErrorRecord 为审核对象；未形成的输入、Snapshot 和输出显示“尚未形成”，不显示虚假 Diff。明确展示“处置动作”，不使用“批准成果”按钮。查看旧 Attempt 时保留 failed / rejected，不把恢复获准显示成 accepted。`wait` 仅在固定外部引用仍暂不可读时可选，显示被固定的引用与 Runtime 的可用性检查；引用恢复后禁用 wait，用户可请求按原 Gate 模式重新评估，并沿用原 Context Snapshot。需要新输入时显示创建新 Run；需求内容变化另建新 UUID。可显式停止同 Runtime 的旧 Run，不展示跨 clone 自动取消承诺。
+错误页以 ErrorRecord 为审核对象，区分 scope=combination 与 integration；未形成的输入、Snapshot 和输出显示“尚未形成”，不显示虚假 Diff。明确展示“处置动作”，不使用“批准成果”按钮。查看旧 Attempt 时保留 failed / rejected，不把恢复获准显示成 accepted。`wait` 仅在固定外部引用仍暂不可读时可选，显示被固定的引用与 Runtime 的可用性检查；引用恢复后禁用 wait，用户可请求按原 Gate 模式重新评估，并沿用原 Context Snapshot。需要新输入时显示创建新 Run；需求内容变化另建新 UUID。可显式停止同 Runtime 的旧 Run，不展示跨 clone 自动取消承诺。
 
 同时展示 `检查修复：已用 / max_check_retries` 与 `自动恢复：auto_recoveries_used / max_auto_recoveries`，前者属于 Attempt，后者属于整个 Run。每轮通过 CheckReport 显示 Tree、全部检查结果及证据；error / not_run 与 failed 分开显示，代码变化后旧通过结果标为历史，不能代表新 Tree。
 
-处置提交绑定 error_ref、错误策略与审核摘要、当前节点摘要、前一决定；服务再次校验额度、Run 和修复范围。自动额度耗尽或错误评估器故障时提供人工接管，禁止自动循环重评。wait 后可以引用原错误作出新决定；已安排恢复或已经失效的错误不能重复执行。
+处置提交绑定 error_ref、错误策略与审核摘要、所属节点或 Run 的文件摘要、前一决定；服务再次校验额度、Run 和修复范围。自动额度耗尽或错误评估器故障时提供人工接管，禁止自动循环重评。wait 后可以引用原错误作出新决定；已安排恢复或已经失效的错误不能重复执行。
 
 外部 Agent 的免审批参数属于运行配置，不作为 Gate 审核或人类确认。所有审核与处置显示“本地保存中 / 本地已生效”，恢复动作在决定与关联状态事务落地后启动。执行与 Gate 不提交 main，Git 同步仅针对已采纳或维护提交。
 
@@ -175,16 +175,17 @@ Runtime 页面显示文件事务恢复、外部操作 unknown 和待对账原因
 
 ## 交付交互
 
+集成错误页显示 Run、失败 IntegrationReport、候选或冲突清单；combination_id / attempt_id 显示“不适用”，不创建占位 Attempt。四种 Gate 模式沿用错误审核交互，动作仅为“重新集成”“修复节点”“停止运行”。修复时选择一个业务节点、填写指令并预览目标与全部后继的失效范围；无关分支显示保留。重检与修复共享 Run 自动恢复额度；无有效动作或评估器故障时等待人工接管。仅缺少原材料副本时先导入，基线变化则提供新建 Run 的入口。
+
 ~~~text
-运行完成 → 汇聚终端成果 → 固定候选与 IntegrationReport
-    ├── blocked：展示已形成材料，不显示虚假候选或通过
-    ├── failed：展示失败检查，可对原候选重新检查
-    └── passed：人类确认具体报告与候选 → 发布 → DeliveryRecord
+节点全部接受 → integrating：汇聚终端成果并运行 integration.checks
+    ├── blocked / failed：保存 IntegrationReport + ErrorRecord → 错误 Gate 重检或修复
+    └── passed：Run completed → 人类确认绑定报告与候选 → 发布 → DeliveryRecord
 ~~~
 
-确认页展示报告 ID、候选 Tree、代码 Diff、需求及基线；确认后更换报告或候选必须重新确认。仅档案变化可保留确认，源码或定义变化要求新 Run。publishing 显示“正在提交本地 main / 结果待对账”，重复点击返回原交付意图。main 工作目录有未提交修改时提示等待用户处理，不提供自动 stash 或覆盖入口。
+确认页只接受 completed Run 绑定的 passed IntegrationReport，展示报告 ID、候选 Tree、代码 Diff、需求及基线；completed 的报告与候选不可替换；需要修改或重新验证时新建 Run，不能复用旧确认。仅档案变化可保留确认，源码或定义变化要求新 Run。publishing 显示“正在提交本地 main / 结果待对账”，重复点击返回原交付意图。main 工作目录有未提交修改时提示等待用户处理，不提供自动 stash 或覆盖入口。
 
-节点全部接受与最终集成检查分别显示；IntegrationReport 为 failed / blocked 时不开放交付确认，服务端同样拒绝。页面不提供人工豁免最终集成检查的入口。
+节点接受、集成进度和最终报告分别显示；IntegrationReport 为 failed / blocked 或 Run 尚未 completed 时不开放交付确认，服务端同样拒绝。页面不提供人工豁免最终集成检查的入口。
 
 确认页同时预览将进入 main 的需求文件、代码 Diff、精简档案及回执。applied / no_change 均显示同一个采纳 Commit；no_change 说明无代码变化，需求与结论仍被保存。不提供对同一 Requirement 或 Run 再次交付的按钮。汇聚冲突时仅显示冲突证据，candidate_ref 尚未形成。
 

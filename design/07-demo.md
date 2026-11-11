@@ -185,14 +185,15 @@ workflow/unit 失败：登录接口尚未返回 remaining_seconds。
 4. 适用时调用外部 Agent，校验并留存 ExecutionResult；不适用则复用输入。Runtime 执行累积的必要检查，适用任务可在预算内续接修复并全量重检；固定最终 Tree 后保存 Checkpoint、CheckReport、只读 Post-Assess、bundle 与证据，计算 review_input_digest。本地 waiting_gate 事务落地后开始审核。
 5. 各成果 Gate 可并行：AI 使用独立会话，脚本直接运行程序。报告是审核输出，不修改执行证据。全部批准与关联状态本地落地后，才解锁后继。
 6. application 与 data 并行，presentation 稳定三方汇聚。若成果 Gate 拒绝，旧 Attempt rejected 并进入错误 Gate。人类选择 repair_upstream 修复 domain；决定和失效范围本地落地后重新执行，历史材料保留。
-7. 全部节点 satisfied，Run completed；本地 summary 整理结果、返工原因和未解决问题。失败、取消或放弃则记录留在本地，不自动提交 main。
-8. Git Manager 验证 main 正式输入未变，在候选中应用成果并原样加入冻结需求文件，保存可恢复候选和 IntegrationReport，运行最终检查。人类确认具体需求、候选和报告。
-9. 选取精简档案及其依赖闭包，构造 DeliveryRecord；一个以最新 main 为父提交的 squash Commit 同时加入需求、代码、档案和回执。Trailer 标识 Requirement / Run / Delivery / Operation，回执不填写自身 Commit OID。main 接纳后即采纳成功，push 状态独立展示。
+7. 全部节点 satisfied，Run 进入 integrating；Runtime 校验正式输入，汇聚终端成果，原样加入冻结需求文件，固定可恢复候选并运行 integration.checks。
+8. 集成通过后绑定 IntegrationReport，Run 才 completed；集成失败保存 ErrorRecord，错误 Gate 可选择 retry_integration 或 repair_combination。修复节点重新执行和审核后再次集成。
+9. 人类确认已绑定的成功报告和候选；Git Manager 重验 main 正式输入未变，使用该候选准备采纳。失败、取消或放弃则记录留在本地，不自动提交 main。
+10. 选取精简档案及其依赖闭包，构造 DeliveryRecord；一个以最新 main 为父提交的 squash Commit 同时加入需求、代码、档案和回执。Trailer 标识 Requirement / Run / Delivery / Operation，回执不填写自身 Commit OID。main 接纳后即采纳成功，push 状态独立展示。
 
 ```text
 main: C0 ─────────────────────────────────────────── C1
        │                                             │
-       └─ 本地需求 → 执行 → 重试 → Gate → 最终检查 ──┘
+       └─ 本地需求 → 执行 → Gate → 集成中 → 集成错误 Gate / 修复 → completed → 人类确认 ──┘
                                                      ├─ requirements/<uuid>.md
                                                      ├─ 项目代码
                                                      └─ runs/<run-id>/（含回执）
@@ -370,7 +371,7 @@ Git 外的独立交换文件
 | 另一 Gate 并发提交 / 当前项过期 | 前者复核固定材料后合并；后者拒绝过期请求 |
 | 决策重复提交 / Runtime 重启 | 按 ID 对账，不重复生成决策或解锁后继 |
 | 新 Attempt 复用 Context Snapshot | 重新审核全部 Gate，不继承旧批准 |
-| 所有节点自动批准 | 运行完成，但交付 main 仍须人类确认 |
+| 所有节点自动批准 | 进入 integrating；只有最终集成通过才 completed，交付 main 仍须人类确认 |
 | 仅运行档案变化 | 输入不失效，交付保留新档案 |
 | 正式输入变化或需求已采纳 | 拒绝旧结果交付 |
 | 无 S3 / LFS 等共享存储 | 单 clone 完整执行并采纳；所需 Artifact 已在发布方本地持久化 |
@@ -418,13 +419,33 @@ Git 外的独立交换文件
 | no_change / not_applicable 仍修改代码或留下冲突 | 与代码条件不符，不能接受成果 |
 | 最终汇聚失败尚无完整候选 | IntegrationReport blocked，candidate_ref / candidate_tree 为 null，保留冲突证据 |
 | 最终集成检查未启动 / 测试执行失败 | 分别为 blocked / failed；未运行项不能当作通过 |
-| 所有节点已接受，但最终集成检查失败或未配置 | 仍不能交付；节点批准和人类确认不能豁免集成检查 |
-| 检查后候选或所选报告变化 | 旧确认失效；对新报告与候选重新确认 |
+| 所有节点已接受，但最终集成检查失败 | 原 Run 进入集成 ErrorRecord / 错误 Gate，可重检或修复节点；不能交付 |
+| 启动时未配置最终集成检查 | 启动校验失败，不创建可执行 Run |
+| completed 后提交不同候选或报告 | 拒绝替换与交付；需要修改或重检时新建 Run，不复用旧确认 |
 | 确认后只有 runs/ 档案变化 | 保留最新档案，允许复用原确认；源码变化则要求新 Run |
 | 连续点击交付、不同 operation_id、本地提交确认丢失 | 同一需求 / Run 复用交付意图与 delivery_id，对账后返回一次成功结果 |
-| 最终候选与正式输入相同 | 仍须通过最终检查与人类确认，一次提交需求、no_change 结论与档案 |
+| 最终候选与正式输入相同 | 仍须通过最终集成检查并将 Run 置 completed，再人类确认，一次提交需求、no_change 结论与档案 |
 | 已交付后的代码又被修改，或回执当前文件被清理 | 从历史查到已成功交付，不能用原 Run 重复应用成果 |
 | 准备放弃运行但交付结果仍未知 | 先对账，确认未交付后才允许放弃或清理 |
+
+## 集成恢复的专项验收
+
+例：最终回归发现登录接口缺少剩余时间，错误 Gate 选择 `repair_combination`，目标为 `login × application`。application 与其后继 presentation 的有效成果失效，domain、data 和 notification 分支保持有效。新 Attempt 引用失败报告及旧成果作为参考，仍从当前有效前驱构造输入；修复并重新通过全部节点 Gate 后全量集成，报告通过才 completed。
+
+| 场景 | 预期结果 |
+| --- | --- |
+| Workflow 草稿没有集成检查 | 可以保存和预览，标为不可运行；发布与启动拒绝 |
+| 全部节点 satisfied | 自动进入 integrating，只有有效 passed 报告可使 Run completed |
+| 完整检查失败、环境错误、终端汇聚冲突 | 分别保存 failed / blocked 报告及 scope=integration 的 ErrorRecord，Run blocked；无虚假 Attempt |
+| 四种集成错误 Gate 模式 | 使用同一动作协议；ai_assisted 仍由人类决定，自动评估故障不递归处理 |
+| retry_integration | 原输入有效、旧任务已停止或隔离后重新汇聚和全量检查；新报告不覆盖旧报告 |
+| repair_combination | 只失效目标与全部后继，新 Attempt 重新检查和审核；无关分支成果保留 |
+| 选择控制节点、扩展 Scope 或集成错误返回 retry_current / wait | 拒绝无效动作，不安排恢复 |
+| 节点恢复两次后自动集成恢复一次 | 同一 Run 共用 3 次额度，再恢复需人工；后继重执行不重复扣减 |
+| 重复决定、事务中断、恢复重放 | 额度与失效范围仅生效一次，操作 ID 对账后推进 |
+| 集成中取消、旧报告迟到、终端成果或基线已变化 | 旧任务不能将 Run 置 completed；新任务开始前停止或隔离旧进程 |
+| 只有原材料副本缺失 | 补齐原内容后恢复未完成操作；不伪造检查失败或自动重新执行已结束检查 |
+| completed 后交付或请求重检 | 交付使用绑定成功报告，不自动重检；修改或重新验证须新 Run |
 
 ## 一次采纳的专项验收
 

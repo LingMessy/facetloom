@@ -160,7 +160,7 @@ integration:
 | execution | 是 | 外部 Agent 调用配置、检查点、必要检查和修复预算；并发配置见 Services |
 | gate | 否 | 每个普通 Node 继承的默认 Gate 策略 |
 | error_gate | 否 | Workflow 唯一的错误处置策略，独立于各 Node 的成果 Gate |
-| integration | 否 | 交付前运行的最终检查；格式见下文 |
+| integration | 发布、启动时必填 | Run 完成前的最终集成检查；工作区草稿可暂缺 |
 
 Facet 列表顺序定义从外到内的替换顺序：`F1 ▷ F2 ▷ ... ▷ Fn`。不是节点执行顺序。替换积结合，因此多 Facet 的分组不影响结果；但不能交换 Facet 顺序。至少一个 Facet；同一 Workflow 不得重复引用同一 Facet ID。
 
@@ -177,7 +177,7 @@ Facet 列表顺序定义从外到内的替换顺序：`F1 ▷ F2 ▷ ... ▷ Fn`
 | gate.evaluator | 无 | source_commit 中的 AI / 脚本评估器 ID；自动评估必须提供匹配类型的配置 |
 | gate.context | 空 | 审核目标、约束与资料；与 Node 的审核上下文累积 |
 
-`integration.checks` 是非空有序检查列表，每项含 Workflow 内唯一的稳定 `id`、非空参数数组 `argv` 和正整数 `timeout_seconds`。命令按参数数组执行，不经 Shell 展开。`integration` 可省略；省略时 WorkflowRun 仍可完成，但不能生成通过的 IntegrationReport 或交付成果。
+`integration.checks` 是非空有序检查列表，每项含 Workflow 内唯一的稳定 `id`、非空参数数组 `argv` 和正整数 `timeout_seconds`。命令按参数数组执行，不经 Shell 展开。工作区草稿可暂缺 `integration` 或使用空检查列表，结构有效时允许保存与图预览，但须标为“不可运行：缺少集成检查”。定义发布与 Run 启动必须校验非空、有效的 integration.checks；不支持只执行节点的运行模式。
 
 并发上限属于每个 clone 的 Runtime 配置，不属于 Workflow 语义。
 
@@ -348,7 +348,7 @@ execution:
       timeout_seconds: 120
 ~~~
 
-有效检查按 Workflow → facets 声明顺序 → 各列表顺序累积，不能覆盖或移除。限定 ID 为 `workflow/<id>` 或 `<facet>/<node>/<id>`，同一声明者内部不能重复。`execution.max_check_retries` 仅在 Workflow 配置。修复、全量重检和 CheckReport 对象见 [Execution](04-execution.md)。`integration.checks` 独立用于交付，不替代节点检查。
+有效检查按 Workflow → facets 声明顺序 → 各列表顺序累积，不能覆盖或移除。限定 ID 为 `workflow/<id>` 或 `<facet>/<node>/<id>`，同一声明者内部不能重复。`execution.max_check_retries` 仅在 Workflow 配置。修复、全量重检和 CheckReport 对象见 [Execution](04-execution.md)。`integration.checks` 独立用于 Run 的最终集成验证，不替代节点检查。
 
 ### Node Gate 与组合审核
 

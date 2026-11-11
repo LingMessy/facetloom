@@ -78,7 +78,7 @@ main                         # 正式定义、已接受代码、精简运行档�
   ├── detached Worktree A → 本地 Checkpoint A
   └── detached Worktree B → 本地 Checkpoint B
                                 ↓
-                         汇聚、Gate、最终检查
+                         汇聚、Gate、集成检查
                                 ↓
                   需求、代码、档案和回执一次 squash 到 main
 ```
@@ -93,7 +93,7 @@ Git 分支只有 `main`。DAG 分支由独立 Worktree 执行；输入与 Checkp
 
 ```text
 本地需求草稿 → 冻结 → Run / Attempt / Gate（本地事务）
-                                  ↓ 最终检查、人类确认
+                                  ↓ 集成通过、人类确认
 main：之前的正式内容 → 一个 Commit：需求 + 代码 + 精简档案 + 回执
                                   ↓ 可选 push / 获取并接纳更新
                              其它 clone
@@ -181,7 +181,7 @@ Artifact URI 标识内容，不是下载地址。采纳归档前只要求拥有�
 
 - **Facet / Node / Combination**：分别是 Source Facet、Facet Node、Combination Node 的简称；Combination DAG 承载静态组合节点，CombinationRun / Attempt 保存运行状态。
 - **当前有效成果**：CombinationRun 的 `accepted_attempt_id` 指向的输出；历史 accepted Attempt 不一定仍有效。
-- **运行完成**：所有业务 CombinationRun 都为 `satisfied`，不表示已经交付。
+- **运行完成**：所有业务 CombinationRun 都为 `satisfied`，且最终 `IntegrationReport` 为 `passed`；不表示已经交付。
 - **已采纳档案**：与需求和代码一并进入 main 的精简记录；与本地执行状态及同步状态分别展示。
 - **采纳顺序**：从 main 的采纳历史生成的阅读顺序；“第几个需求”仅为展示序号，身份始终使用 UUID。
 - **精炼**：Refinement，目标是减少当前目录与 Agent 上下文中的已处理记录，不清除 Git 历史。

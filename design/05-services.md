@@ -45,7 +45,7 @@ flowchart LR
 
 保存请求为一批 `writes`，每项含仓库相对 path、before_digest 和完整 UTF-8 content；新增的 before_digest 为 null，删除的 content 为 null。请求来自 UI 缓冲区或 CLI stdin。目标限于 Workflow、Facet、Scope 定义文件；runner、evaluator 和资料可通过文本编辑维护。拒绝越界、重复目标、符号链接以及 `.runtime/`、runs/、Requirement 正文作为目标。
 
-1. 在内存中应用整批候选，校验文件、引用及所有受影响 Workflow。无效时保持磁盘内容，保留编辑缓冲区。
+1. 在内存中应用整批候选，校验文件、引用及所有受影响 Workflow。缺少或空的 integration.checks 仅在工作区保存时作为“不可运行”诊断；其他结构、引用或图错误拒绝保存，保持磁盘内容及编辑缓冲区。发布与启动使用完整校验，要求非空、有效的集成检查。
 2. 获取 clone 定义写入锁，复核 HEAD、目标摘要及本轮引用文件摘要；新增路径已存在、外部修改或索引有未合并项时拒绝保存。
 3. 在 `.runtime/definition-operations/<operation-id>/` 保存 kind=save、目标清单、前后摘要、原字节、新载荷及 COMMITTED 标记并 fsync。这是恢复日志，不是独立配置版本。
 4. 各文件在目标目录写临时文件、fsync、再次核对原摘要后原子 rename，并 fsync 父目录；删除只移除摘要匹配的目标。全批完成后写 APPLIED。多文件批次未完成时服务拒绝预览、发布和启动，不消费中间状态。
@@ -74,7 +74,7 @@ flowchart LR
 | 本地 Attempt、Worker 与容器 | 对账、恢复；无法恢复则 failed 并创建 ErrorRecord，不重复启动 |
 | main 正式输入、采纳历史与 replaces_run_id | 检测基线变化、阻止重复采纳；显式替代仅停止同 Runtime 的本地 Run |
 | Gate 报告与决策 | 成果全部批准后以本地事务接受；拒绝转错误 Gate；恢复动作与额度同事务落地后执行 |
-| 运行完成与采纳 | 本地整理结果和证据；仅最终采纳向 main 提交需求、代码与精简档案 |
+| 集成与运行完成 | 节点全部满足后调度集成任务；成功报告绑定后才将 Run 置 completed，失败进入集成错误 Gate |
 
 创建 Attempt、变更状态、接收取消和准备交付，先在本地原子持久化。每个 clone 独立限制并发；同一 Run 由创建它的 Runtime 写入。其它 clone 只读同步，或经拥有者受信接口提交人类操作；首阶段不实现活动运行接管和远程实时状态共享。
 
@@ -170,9 +170,9 @@ side_effects:
 这是 Runtime 内的一项职责，不另设持久 GateRun：
 
 1. 启动 Run 时校验成果及错误策略、检查、评估器与引用；错误策略固定在 run.yaml，成果策略在准备成功后固定到 Context Snapshot。能力不足按执行错误或评估器故障分别处理。
-2. 成果材料完整后本地冻结 Attempt.waiting_gate；节点出错或成果拒绝后持久化 ErrorRecord 及 CombinationRun.waiting_gate。本地事务落地后才发起对应成果项或 workflow/error 的正式评估；四种模式共用调用基础设施。
+2. 成果材料完整后本地冻结 Attempt.waiting_gate；节点出错或成果拒绝后持久化 ErrorRecord 及 CombinationRun.waiting_gate；集成失败时持久化 IntegrationReport、scope=integration 的 ErrorRecord 与 Run.blocked。本地事务落地后才发起对应成果项或 workflow/error 的正式评估；四种模式共用调用基础设施。
 3. 调用前保存 report_id、review_input_digest、实际初始评估请求、前一决策 ID 和本地任务状态。保存报告前持久化 request_input_ref，只有请求尚未形成即失败时可为空。任务身份包含 review_kind；错误任务还绑定 error_ref，同一审核对象同时最多一个活动评估。不同项可并行，限制沿用 clone 的并发配置。
-4. 按 review_kind 验证结果或处置动作。成果报告引用更新 Attempt，错误报告引用更新 CombinationRun；AI/脚本恢复动作同时校验 Run 级额度和失效范围。评估器自身故障交给人类，不递归调用错误 Gate。
+4. 按 review_kind 验证结果或处置动作。成果报告引用更新 Attempt，错误报告按 scope 更新 CombinationRun 或 run.yaml；AI/脚本恢复动作同时校验 Run 级额度和失效范围。评估器自身故障交给人类，不递归调用错误 Gate。
 5. 接管、取消、成果拒绝或输入失效时，先持久化撤销相关任务，再停止进程。成果拒绝只撤销原成果评估，另发起错误审核。重启按 report_id 对账；迟到或已失效任务不能推进状态。
 
 成果评估器使用固定代码与审核材料的隔离副本，测试只能产生临时文件；错误评估器读取 ErrorRecord 与可用输入，没有代码时仍可处置。脚本从 source_commit 解析，不能被候选代码替换。AI 评审使用 Run.runners 中的固定配置及独立会话，脚本按评估器的有效环境与网络配置运行。协议与汇总规则见 [Governance](03-governance.md)。
@@ -194,7 +194,7 @@ Git Manager 是唯一执行受信 Git 写入的组件；管理 main、隔离 Wor
 
 ```text
 执行 / Gate / 恢复决定 → 本地事务 COMMITTED → APPLIED → 生效与继续调度
-                                                           ↓ 最终检查、人类确认
+                                                           ↓ 集成通过、人类确认
                                     需求 + 代码 + 精简档案 + DeliveryRecord
                                                            ↓ 一次 squash
                                                        本地 main
@@ -219,7 +219,7 @@ Git Manager 是唯一执行受信 Git 写入的组件；管理 main、隔离 Wor
 
 本地成果接受、恢复和取消共用 Run 锁及文件事务，按实际提交顺序确定结果。取消先封禁执行身份、持久化停止与撤销意图；迟到报告不推进状态。accepted / rejected 等既有终态保留，节点失效则清除当前有效引用。取消不向 main 追加日志。
 
-最终采纳也持有 Run 锁；未进入 publishing 时可取消意图，publishing 或 main 结果未知时须先对账。采纳已进入 main 则保留成功事实，不再取消或重放；撤回正式成果使用 Git revert。completed Run 的未交付成果可由人类明确放弃，规则见 Execution。
+最终采纳也持有 Run 锁；只有 completed 且绑定 passed IntegrationReport 的 Run 才能创建交付意图；未进入 publishing 时可取消意图，publishing 或 main 结果未知时须先对账。采纳已进入 main 则保留成功事实，不再取消或重放；撤回正式成果使用 Git revert。completed Run 的未交付成果可由人类明确放弃，规则见 Execution。
 
 不同需求可并行执行；main 采纳串行进行。先采纳的需求改变正式输入后，其它旧基线 Run 需在新 source_commit 下重跑，即使文本可自动合并也不复用旧候选检查。仅 runs/ 的精炼清理不改变执行输入。Run 目录有不同 UUID 只解决文件命名，不证明代码或定义兼容。
 
@@ -245,7 +245,7 @@ Git 同步不要求同时导入所有 Artifact；可先读摘要，所需原始�
 
 根输入来自 source_commit，汇聚输入来自最终约简 DAG 快照的直接前驱当前有效输出，按 Execution 的稳定逐步三方合并协议构造。活动 Worktree 锚定需要的本地 Commit；关闭前保证有后继 Worktree 或已验证的持久 Git bundle。记录持久化前将所需 Artifact 保存到拥有者本地库，验证 Git bundle 在空仓库中可恢复输入与输出。不用额外命名分支维持快照，也不要求上传到共享服务。
 
-最终交付时，在最新 main 上应用成果并加入冻结需求文件，保留既有档案；候选及最终检查报告先本地持久化，再获取绑定候选的人类确认。applied / no_change 均在同一个 squash Commit 中写入需求、精简档案和 DeliveryRecord，不追加回执提交。
+集成准备时应用成果并加入冻结需求文件，形成候选；最终交付在最新 main 上保留既有档案并复核相同候选；completed 绑定的候选及 IntegrationReport 先本地持久化，再获取绑定候选的人类确认；交付不重新执行集成检查。applied / no_change 均在同一个 squash Commit 中写入需求、精简档案和 DeliveryRecord，不追加回执提交。
 
 本地 `.runtime/runs/<run-id>/delivery.yaml` 保存活动交付意图和确认。调度、取消及交付共用 Run 锁；准备 main 提交时再获取仓库发布锁。本地预期头变化必须重验；publishing 表示正在提交本地 main，结果未知时先查 Trailer，不创建第二个 delivery_id。后续 push 不参与交付状态。协议与字段见 Execution。
 
@@ -282,7 +282,7 @@ Refinement 是 Runtime 提供的本地交互功能，不是独立共享审批服
 
 网络为 disabled / outbound；outbound 供外部 Agent 访问模型服务，并受 Runtime 可实施的网络策略限制。只有明确提供可达本地服务或不需要联网的任务才可使用 disabled；纯脚本及必要检查可独立禁网。拒绝无法满足的配置，不将禁网失败误报为代码测试失败。
 
-成果 AI Gate 在新容器/会话中读取固定候选的只读副本，缓存和临时产物位于独立可写目录；错误 Gate 读取 ErrorRecord 与可用证据。支持证据文件输出的 Agent Invocation 另有新的专用 `evidence-out/` 目录，以只读输入和可写输出挂载给容器；它与项目 Worktree、原始候选和 Artifact Store 隔离。AI Gate 与 Refinement 的外部 Agent 使用同一证据文件导入协议；Script Gate 只返回已校验的类型化证据引用。即使原生 Agent 关闭内部沙箱，也不能写原 Worker 成果或 main。最终检查与精炼验证使用独立候选副本。
+成果 AI Gate 在新容器/会话中读取固定候选的只读副本，缓存和临时产物位于独立可写目录；错误 Gate 读取 ErrorRecord 与可用证据。支持证据文件输出的 Agent Invocation 另有新的专用 `evidence-out/` 目录，以只读输入和可写输出挂载给容器；它与项目 Worktree、原始候选和 Artifact Store 隔离。AI Gate 与 Refinement 的外部 Agent 使用同一证据文件导入协议；Script Gate 只返回已校验的类型化证据引用。即使原生 Agent 关闭内部沙箱，也不能写原 Worker 成果或 main。集成任务与精炼验证使用独立候选副本；集成失败由 Workflow 错误 Gate 在原 Run 内安排重检或节点修复。
 
 ### Worker、调用与会话
 

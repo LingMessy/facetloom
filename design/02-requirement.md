@@ -181,6 +181,9 @@ WorkflowRun 的必需字段如下：
 | `error_gate` | 是 | 完整有效错误策略及 `policy_digest`，含模式、完整 evaluator、审核上下文、来源路径和自动恢复上限；启动时固定。 |
 | `runners` | 是 | runner_id → `{profile, source_refs, profile_digest}` 的不可变映射，覆盖执行及 AI 评估所需调用配置。 |
 | `merge_engine` | 是 | Runtime 在创建 Run 时固定的 Git 版本、不可变环境引用及有效合并参数；结构见 Execution，Run 内不可切换。 |
+| `integration_report_ref` | 是 | 最新 IntegrationReport 类型化引用，初始 null；仅对应当前有效终端成果。修复或重检开始时清空，历史报告保留；completed 后绑定成功报告，不再替换。 |
+| `active_error_ref` | 是 | 当前集成错误的 ErrorRecord 引用，初始 null；节点错误仍由 CombinationRun 保存。 |
+| `error_report_ref`、`error_decision_ref` | 是 | 当前集成错误的最新报告与决定，初始 null；处置结束或失效时连同 active_error_ref 清空，历史文件保留。 |
 | `auto_recoveries_used` | 是 | 已安排的自动恢复动作次数，初始 0；与动作意图在同一事务递增，重启不重置。 |
 | `status_reason` | 条件 | `blocked` 或 `cancelled` 时的原因；结构见本节。 |
 | `delivery_abandonment` | 否 | 人类放弃未交付成果时记录 confirmed_by、非空 reason 和 confirmed_at；存在时不可交付。 |
@@ -189,7 +192,7 @@ WorkflowRun 的必需字段如下：
 启动流程：
 
 1. 校验人类确认的冻结绑定；“冻结并启动”先按起草协议确认当前摘要并完成冻结。检查 UUID 未被采纳，再读取本地 main 完整 OID 为 source_commit，无需 remote 或先 fetch。
-2. 按 [定义保存与生效边界](01-workflow.md#保存与生效边界) 检查工作区和索引中的定义及引用资料，无未提交改动后，只从 source_commit 校验 Workflow、Facet、必要检查、runner、成果及错误 Gate、评估器和资料。拒绝用运行档案作定义输入，也不能将工作区预览直接作为 Run 的图。
+2. 按 [定义保存与生效边界](01-workflow.md#保存与生效边界) 检查工作区和索引中的定义及引用资料，无未提交改动后，只从 source_commit 校验 Workflow、Facet、必要检查、非空 integration.checks、runner、成果及错误 Gate、评估器和资料。拒绝用运行档案作定义输入，也不能将工作区预览直接作为 Run 的图。
 3. 生成并校验 DAG。若显式替代本地未终态 Run，先在旧 Run 锁下持久化替代操作 ID、新 run_id、调度撤销与停止意图，释放锁后再创建新 Run；旧 Run 已停止而新建失败时，以同一操作 ID 幂等重试，不恢复旧执行。不同时持两个 Run 锁。将新 run.yaml、dag.yaml、冻结需求引用及初始状态原子持久化。
 4. 再次校验 main 的正式输入仍匹配 source_commit、需求尚未采纳，然后调度节点。启动不写 main；正式输入变化则阻塞，要求固定新基线的新 Run。
 
@@ -199,13 +202,14 @@ WorkflowRun 的必需字段如下：
 | --- | --- |
 | `pending` | 已创建，尚未开始调度。 |
 | `running` | 正在调度或执行；Combination 可处于不同状态。 |
-| `blocked` | 没有任何 Combination 可由 Runtime 或活动 Worker 继续推进，至少一项等待人工或外部条件；条件满足后可恢复。 |
-| `completed` | 所有业务 CombinationRun 均为 `satisfied`；最终交付可以仍待处理。 |
+| `integrating` | 全部业务节点 satisfied，Runtime 正在汇聚终端成果并执行最终集成检查。 |
+| `blocked` | 节点阶段没有可继续推进的工作，或集成失败等待错误处置、材料或人工协调；条件满足后可恢复。 |
+| `completed` | 所有业务节点 satisfied，且当前有效 IntegrationReport 为 passed；候选与报告已固定，等待人类确认交付。 |
 | `cancelled` | 已停止调度；活动 Attempt 已取消或停止请求已持久化。 |
 
-cancelled 表示停止调度；Worker 是否实际退出单独展示。交付在途时先按 [Services](05-services.md) 对账 main，再决定是否可取消或放弃。
+cancelled 表示停止调度；Worker 与集成检查进程是否实际退出单独展示。交付在途时先按 [Services](05-services.md) 对账 main，再决定是否可取消或放弃。
 
-`completed` 和 `cancelled` 为终态；需要改变已完成运行的输入或成果时创建新 WorkflowRun。状态转换如下。
+`completed` 和 `cancelled` 为终态；需要改变已完成运行的输入、成果或重新验证时创建新 WorkflowRun。状态转换如下。
 
 ```mermaid
 stateDiagram-v2
@@ -213,14 +217,19 @@ stateDiagram-v2
     pending --> running
     pending --> cancelled
     running --> blocked
-    running --> completed
+    running --> integrating: 全部节点 satisfied
     running --> cancelled
     blocked --> running
-    blocked --> completed
+    blocked --> integrating: 材料补齐或批准重检
+    integrating --> blocked: 集成失败或等待材料
+    integrating --> completed: 有效集成报告 passed
+    integrating --> cancelled
     blocked --> cancelled
     completed --> [*]
     cancelled --> [*]
 ```
+
+集成失败时，即使自动错误 Gate 正在评估，Run 也保持 blocked；决定落地后，retry_integration 转 integrating，repair_combination 转 running。状态原因及集成错误引用区分等待处置与节点等待，不新增 IntegrationRun。
 
 本地事务提交并完整落地后，报告、决策、accepted / satisfied 和恢复动作生效；全部成果 Gate 批准才解锁后继。无需向 main 发布正式审核请求或中间状态。事务失败不暴露半状态，恢复先重放再调度；Git 同步状态不进入运行状态机。
 
@@ -312,6 +321,10 @@ runners:
         blob_oid: <blob-oid>
         digest: sha256:<file-digest>
     profile_digest: sha256:<runner-profile-digest>
+integration_report_ref: null
+active_error_ref: null
+error_report_ref: null
+error_decision_ref: null
 auto_recoveries_used: 0
 created_at: "2026-11-04T12:00:00Z"
 updated_at: "2026-11-04T12:00:00Z"
@@ -412,15 +425,15 @@ updated_at: "2026-11-09T12:00:00Z"
     └── stop_run → 取消未结束运行
 ```
 
-恢复动作必须引用错误决定。自动恢复预算按整个 Run 共享，默认 3 次；一次 retry_current 或 repair_upstream 各计一次，后者触发的后继重执行不另计。AI/脚本决定安排恢复时，Runtime 在同一事务中记录动作 ID、消耗额度和失效范围；重复重放不再扣减。额度耗尽后，自动评估器不能安排恢复；人类仍可决定恢复，或停止 Run。人工及 ai_assisted 人类确认的恢复不消耗自动额度，也不重置已有计数。
+恢复动作必须引用错误决定。自动恢复预算按整个 Run 共享，默认 3 次；retry_current、repair_upstream、retry_integration、repair_combination 每次各计一次；一次修复触发的后继重执行不另计。AI/脚本决定安排恢复时，Runtime 在同一事务中记录动作 ID、消耗额度和失效范围；重复重放不再扣减。额度耗尽后，自动评估器不能安排恢复；人类仍可决定恢复，或停止 Run。人工及 ai_assisted 人类确认的恢复不消耗自动额度，也不重置已有计数。
 
-修复目标只能是当前节点的祖先；当前节点重试使用 retry_current。Runtime 原子清除修复目标和全部可达后继的有效成果引用，持久化停止意图，拒收迟到任务结果；无依赖分支继续。目标在其前驱满足后 pending，后继依次等待新成果。历史 accepted、rejected 和 failed Attempt 不改写。
+节点错误的 repair_upstream 目标只能是当前节点的祖先；当前节点重试使用 retry_current。集成错误的 repair_combination 可选同 Run 的任一业务节点；动作协议见 [错误 Gate](03-governance.md#错误评估协议与决定)。Runtime 原子清除修复目标和全部可达后继的有效成果引用，持久化停止意图，拒收迟到任务结果；无依赖分支继续。目标在其前驱满足后 pending，后继依次等待新成果。历史 accepted、rejected 和 failed Attempt 不改写。
 
 每个新 Attempt 仍按根基线或当前有效前驱构造输入；失败或拒绝的代码仅作显式证据，不自动成为输入。新的或变化的任务指令进入新 Context Snapshot，并包含处置决定、修复要求与原错误引用；只有在输入内容完全相同时才可复用 Snapshot，且新 Attempt 的全部成果 Gate 仍须重新审核。
 
 `wait` 仅适用于 Pre-Assess 已确认的固定外部引用暂时不可读取。等待期间 Run 与 CombinationRun 保持 blocked，原 Attempt、ErrorRecord 和 Context Snapshot 不变；Runtime 不自动轮询或重发调用。引用恢复可读后，用户显式请求重新处置同一 ErrorRecord；错误 Gate 按固定模式重新评估并生成决定。决定为 `retry_current` 时，新 Attempt 复用原 Snapshot 并重新运行 Pre-Assess。
 
-需要修改需求时创建新 Requirement；仅调整 Workflow、Facet、Scope、runner 或资料等执行定义时，先由人类提交定义到 main，再创建固定新 source_commit 的 Run，需求未变可继续引用原 requirement_ref。可用 replaces_run_id 显式停止同 Runtime 的未终态旧 Run；其它 clone 的独立运行不受此关联控制。不得修改旧 Snapshot 或在旧 Run 中追加定义输入。错误 Gate 不能扩展需求、Scope 或审核策略。最终汇聚或交付失败保留 IntegrationReport，修改成果须新 Run。
+需要修改需求时创建新 Requirement；仅调整 Workflow、Facet、Scope、runner 或资料等执行定义时，先由人类提交定义到 main，再创建固定新 source_commit 的 Run，需求未变可继续引用原 requirement_ref。可用 replaces_run_id 显式停止同 Runtime 的未终态旧 Run；其它 clone 的独立运行不受此关联控制。不得修改旧 Snapshot 或在旧 Run 中追加定义输入。错误 Gate 不能扩展需求、Scope 或审核策略。最终集成失败仍在原 Run 内通过错误 Gate 修复；completed 后的成果修改或重检须新 Run。交付写入故障按原交付意图对账，不重新执行节点。
 
 ### 状态原因
 
@@ -437,7 +450,7 @@ status_reason:
       digest: sha256:<digest>
 ```
 
-code 为机器可读字符串，message 非空，related_refs 使用 Execution 的类型化引用。常用码包括 preparation_failed、pre_assess_blocked、pre_assess_failed、post_assess_failed、evidence_import_failed、evidence_reference_invalid、worker_lost、execution_failed、gate_rejected、gate_pending、upstream_invalidated、upstream_misaligned、requirement_already_adopted、permission_denied、input_conflict、recovery_budget_exhausted、error_gate_failed、user_cancelled。
+code 为机器可读字符串，message 非空，related_refs 使用 Execution 的类型化引用。常用码包括 integration_failed、integration_blocked、preparation_failed、pre_assess_blocked、pre_assess_failed、post_assess_failed、evidence_import_failed、evidence_reference_invalid、worker_lost、execution_failed、gate_rejected、gate_pending、upstream_invalidated、upstream_misaligned、requirement_already_adopted、permission_denied、input_conflict、recovery_budget_exhausted、error_gate_failed、user_cancelled。
 
 ## Attempt
 

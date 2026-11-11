@@ -31,7 +31,9 @@ main：Requirement + Workflow + Facets + 正式代码 + 精简运行档案
     ↓
 必要检查与预算内修复 → Checkpoint → 各 Node 的 Gate 全部批准 → 汇聚
     ↓
-最终集成检查与人类确认 → 需求、代码、精简档案和回执一次 squash 到 main
+最终集成（失败由错误 Gate 重检或修复）→ Run completed → 人类确认
+    ↓
+需求、代码、精简档案和回执一次 squash 到 main
     ↓
 Refinement → 人类筛选记录 → Agent 建议 → 采纳并验证
     ↓

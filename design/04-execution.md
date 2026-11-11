@@ -170,7 +170,7 @@ Commit 去重 → 去掉被其他输入包含的祖先 Commit
 5. Git 工具环境使用 run.yaml.merge_engine 的不可变环境，默认 Git 2.43.0、ort、conflict_style=merge、renames=true、rename_threshold=50%、rename_limit=0（不限制）、diff_algorithm=histogram。隔离用户/系统 Git 配置，禁用 rerere、外部合并驱动、过滤器和换行转换，不允许本地属性覆盖；仓库属性来自固定输入。完整有效参数进入清单，Run 内不切换环境。
 6. 退出码 0 为干净结果，1 为有冲突的候选结果，其他值为输入准备错误。缺失对象或共同历史、工具故障及不支持的合并能力进入错误 Gate。
 
-相同输入 OID、顺序和工具环境必须生成相同候选 Tree 与冲突清单。正式输入和 Checkpoint Commit 的时间等元数据不要求跨次 OID 相同。最终多个终端成果的交付汇聚使用相同算法；若有未解决冲突，保存 blocked IntegrationReport，不能在已 completed Run 内修改成果。
+相同输入 OID、顺序和工具环境必须生成相同候选 Tree 与冲突清单。正式输入和 Checkpoint Commit 的时间等元数据不要求跨次 OID 相同。最终多个终端成果的集成汇聚使用相同算法；若有未解决冲突，保存 blocked IntegrationReport 和集成 ErrorRecord，由错误 Gate 在原 Run 内安排节点修复。
 
 ### 冲突与输入清单
 
@@ -695,11 +695,11 @@ project_tree(main) == project_tree(source_commit)？
              加入精简档案和回执 → 一次 squash 到 main
 ```
 
-1. 所有业务 Combination satisfied 后 Run 为 completed。汇聚有效终端输出；冲突保留证据并阻塞交付。
+1. 所有业务 Combination satisfied 后 Run 自动进入 integrating。先保存稳定 operation_id、report_id、终端成果清单与集成任务意图，再汇聚有效输出；同一 Run 同时最多一个活动集成任务。
 2. 校验需求未被采纳、没有 delivery_abandonment，且最新 main 与 source_commit 的 project_tree 相同。冻结需求的正式路径必须不存在；历史已有采纳时返回既有结果。
 3. 在隔离 Worktree 上应用相对 source_commit 的成果变更，保留最新 main 档案。Worker 的变更仍受执行 Scope 约束；Git Manager 将 requirement_ref 的原始字节写到 `.facetloom/requirements/<requirement-id>.md`，此受信写入独立于 Worker Scope。
-4. 固定 candidate_ref 和 candidate_tree，运行 source_commit 中全部 integration.checks，保存 IntegrationReport。检查可以生成临时文件，不得改写候选的被跟踪内容。
-5. 人类确认具体报告、需求与候选。Git Manager 重验 main 后加入精简档案及 DeliveryRecord，以最新 main 为唯一父提交创建一个 squash Commit，并更新 main。
+4. 固定 candidate_ref 和 candidate_tree，运行 source_commit 中全部 integration.checks，保存 IntegrationReport。检查可以生成临时文件，不得改写候选的被跟踪内容。全部通过且输入仍有效时，将成功报告与 completed 状态同事务保存；失败或可恢复的执行问题交集成错误 Gate。
+5. 人类确认 completed Run 已绑定的成功报告、需求与候选；交付不重新执行集成检查。Git Manager 重验 main 后加入精简档案及 DeliveryRecord，以最新 main 为唯一父提交创建一个 squash Commit，并更新 main。
 
 `candidate_tree = project_tree(candidate_ref)`，**包含本次需求文件**，因此即使无代码变化也不是空提交。最终采纳提交的 project_tree 必须等于 candidate_tree。档案和回执不参与此 Tree，避免报告或回执引用自身所在 Commit 的循环。
 
@@ -759,21 +759,46 @@ created_at: "2026-11-09T12:00:00Z"
 
 | 情况 | 报告结论 |
 | --- | --- |
-| 完整候选、基线有效、非空 integration.checks 全部通过 | passed，允许请求人类交付确认 |
-| 检查完整结束，至少一项失败 | failed，保留候选与失败证据 |
-| 输入汇聚冲突、基线过期、环境不可用、证据缺失或未配置最终检查 | blocked，保存已形成材料及原因 |
+| 完整候选、基线有效、非空 integration.checks 全部通过 | passed；本地事务绑定报告并将 Run 置 completed，允许请求人类交付确认 |
+| 检查完整结束，至少一项失败 | failed，保留候选与失败证据，交集成错误 Gate |
+| 输入汇聚冲突、环境不可用、证据未形成或不可恢复 | blocked，保存已形成材料，交集成错误 Gate |
+| 基线过期或需求已采纳 | blocked，阻止继续；不提供同 Run 恢复动作 |
+| 仅缺已有材料的本地副本 | blocked，先补齐原引用内容，不创建新的错误事实 |
 
-合并冲突时可以保留候选冲突 Tree 的证据，但 candidate_ref / candidate_tree 仍为 null；它不属于可交付候选。未运行的检查记 not_run，无法启动的项记 error；只要存在 error / not_run 就不能报告 passed / failed。全部配置项都未声明时 checks=[] 且 blocked。
+合并冲突时可以保留候选冲突 Tree 的证据，但 candidate_ref / candidate_tree 仍为 null；它不属于可交付候选。未运行的检查记 not_run，无法启动的项记 error；只要存在 error / not_run 就不能报告 passed / failed。启动前已要求非空检查；若运行中发现固定配置无效，按数据完整性错误阻塞并交人工处理，不能以 checks=[] 通过。
 
-节点全部被接受只表示 Run 执行完成，不代表集成检查通过。IntegrationReport 为 failed / blocked 时不能交付；节点 Gate 的批准与人类交付确认都不能豁免最终集成检查。
+节点全部被接受只表示可以进入 integrating，不代表 Run 完成。IntegrationReport 为 failed / blocked 时不能交付；节点 Gate 的批准与人类交付确认都不能豁免最终集成检查。
 
 检查命令与受信入口来自 source_commit，实际环境、日志和结果进入证据；不能用候选代码改写审核入口。candidate_ref 必须在报告本地保存前可由 main 历史或自包含 bundle 恢复，报告的 candidate_tree 从恢复出的 Commit 重新计算。
 
-相同代码候选可重跑最终集成检查并保存新报告；修改成果需新 Run。新报告不能覆盖旧报告或继承旧报告的人类确认。
+集成失败后的重检通过 retry_integration 授权，保存新报告；需要修改代码时通过 repair_combination 安排节点修复。只有 completed 后需要修改或重检才创建新 Run。新报告不覆盖旧报告；未完成集成时不存在交付确认。
 
-main 在检查后只有 runs/ 变化时，可保留最新档案重构尚未采纳的完整 Commit，复用相同候选与报告的确认。代码、定义或已采纳需求变化要求新 Run；候选、有效成果或报告变化必须重新确认。
+main 在检查后只有 runs/ 变化时，可保留最新档案重构尚未采纳的完整 Commit，复用相同候选与报告的确认。代码、定义或已采纳需求变化要求新 Run；completed 后候选、有效成果或报告不匹配时拒绝交付，不能通过重新确认原地替换。
+
+### 集成恢复与任务一致性
+
+```mermaid
+flowchart TD
+    N[全部业务节点 satisfied] --> I[integrating：汇聚与全量检查]
+    I -->|通过| C[completed：固定成功报告与候选]
+    C --> H[人类确认交付]
+    I -->|冲突、检查失败或执行错误| E[blocked：IntegrationReport + ErrorRecord]
+    E --> G[Workflow 错误 Gate]
+    G -->|retry_integration| I
+    G -->|repair_combination| R[目标与后继失效：running]
+    R --> N
+    G -->|stop_run| X[cancelled]
+```
+
+集成报告、ErrorRecord、run.yaml 的引用与 blocked 状态同事务落地后才发起错误评估；材料持久化失败先恢复本地事务。恢复动作、额度和任务意图也共用本地事务。动作的字段与范围见 [错误评估协议](03-governance.md#错误评估协议与决定)。修复后新 Snapshot 明确引用失败报告和旧成果作为证据，根基线及前驱输入规则不变。
+
+任务使用现有本地操作日志，不新增 IntegrationRun 文件。绑定 operation_id、report_id、run_id、source_commit、按 Combination ID 排序的终端 accepted_attempt_id 与输出引用、可空的恢复决定引用；报告只可由该活动任务发布一次。Runtime 在 Run 锁下复核任务未撤销、Run 仍 integrating、终端成果和正式输入未变后，才接收报告并推进状态。重检分配新操作与报告 ID；旧报告不可替换新任务结果。
+
+重启先重放已提交事务并对账集成进程及已有报告；结果未知时保持待对账，不自动重复启动。取消或修复先持久化撤销与停止意图；旧进程必须停止或隔离后才安排新任务，迟到结果仅保留诊断，不能完成 Run 或覆盖有效引用。补齐原材料只恢复未完成任务；若需重新执行已结束的检查，须由错误 Gate 批准重检。基线失效或需求已采纳时停止推进，不能以恢复动作或旧 passed 报告完成 Run。
 
 ### 交付意图与确认
+
+只有 completed 且绑定有效 passed IntegrationReport 的 Run 才能创建交付意图。报告与候选从 run.yaml.integration_report_ref 读取，接口不能另选报告；交付只校验绑定、可读性及输入有效性，不重跑检查。
 
 同一 Run 在拥有者 Runtime 中最多一份活动交付意图，保存在 `.runtime/runs/<run-id>/delivery.yaml`，使用既有文件事务持久化。
 
@@ -788,7 +813,7 @@ confirmation: null
 result_commit: null
 ~~~
 
-状态为 preparing → ready → confirmed → publishing → delivered；publishing 指正在将候选提交到本地 main，与远端同步无关。尚未形成候选、检查失败或正式输入变化时为 blocked。blocked 在条件恢复后可重新准备；本地提交结果未知时保持 publishing，完成对账之前不新建交付。候选或报告变化清空旧确认，delivery_id 不用于另一份不同成果的交付。
+状态为 preparing → ready → confirmed → publishing → delivered；publishing 指正在将候选提交到本地 main，与远端同步无关。材料暂不可读、工作目录暂不可写或正式输入变化时为 blocked。材料补齐、工作目录恢复干净后可重新准备同一成功候选；正式输入变化则要求新 Run，不能原地重检；本地提交结果未知时保持 publishing，完成对账之前不新建交付。completed 的候选与报告不可替换；不匹配则拒绝操作，delivery_id 不用于另一份不同成果的交付。
 
 人类确认记录 `confirmed_by`、`confirmed_at`，并固定以下对象的 JCS SHA-256 摘要为 confirmation.digest：
 
