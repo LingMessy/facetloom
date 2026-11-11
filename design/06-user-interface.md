@@ -9,6 +9,7 @@
 ├── Requirement
 ├── Workflow / Facets / DAG Preview
 ├── Runs
+│   ├── Selection / 原图、筛选结果与执行图
 │   ├── Summary / 未解决问题
 │   ├── DAG / CombinationRun / Attempt
 │   ├── Diff / Checkpoint / CheckReport / Evidence
@@ -27,7 +28,7 @@
 | --- | --- | --- |
 | Requirement | 起草模式、runner、草稿与 AI Diff、冻结需求、关联 Run、已采纳历史 | 编辑、请求 AI 辅助、切换模式、审阅并冻结、启动 Run；修改冻结需求则创建新 UUID |
 | Workflow | 源 Facet 编辑器、Scope、校验、组合预览和影响 Diff | 编辑节点/边/属性、保存工作区 YAML、审阅并提交发布 |
-| Run | 本地状态与已采纳档案、结果、问题和证据 | 取消、重试、请求交付或明确放弃未交付成果 |
+| Run | 筛选进度、原图与实际执行图、本地状态与档案、结果和证据 | 取消、重试、请求交付或明确放弃未交付成果 |
 | 成果 Gate | 各 Node 的模式、审核要求、报告、主体与汇总状态 | 人工项决策、批量确认、异常接管或请求重评 |
 | 错误 Gate | 错误阶段、材料、处置报告、当前额度及失效范围 | 重试当前节点、修复祖先、等待或停止；异常接管 |
 | Delivery | completed Run 的固定候选、成功 IntegrationReport、绑定确认、交付意图与成功回执 | 确认交付、查看交付对账；集成重检或节点修复从错误 Gate 进入 |
@@ -106,7 +107,7 @@ facetloom workflow publish <workflow-id>      # 预览、选定文件并人工�
 
 validate / preview / impact 默认读取本地 main 固定 Commit；`--workspace` 使用工作区。impact 以 main 为比较基线，默认 main 对 main 没有变化；新增 Workflow 仅能用工作区模式，以空图为基线。save 输入格式见 Services，Workflow ID 用于定位入口，实际须检查所有受影响 Workflow；save 不提交，publish 不启动 Run。
 
-新 Run 入口只能选择 main 中已提交且有效的 Workflow，并要求非空 integration.checks；工作区草稿缺少集成检查时可以保存和预览，但显示不可运行并阻止发布与启动。发现未提交定义或引用资料时列出文件，要求提交或恢复。启动后的图只读显示该 Run 固定快照，不能从运行页面直接修改它。
+新 Run 入口只能选择 main 中已提交且有效的 Workflow，并要求完整 selection 配置及非空 integration.checks；工作区草稿缺少这些配置时可以保存和预览，但显示不可运行并阻止发布与启动。发现未提交定义或引用资料时列出文件，要求提交或恢复。启动后的图只读显示该 Run 固定快照，不能从运行页面直接修改它。
 
 ## DAG 与 Gate
 
@@ -124,7 +125,7 @@ flowchart LR
 
 调用详情列出 Agent 提交的证据相对路径、导入状态、Artifact 摘要和可打开的持久引用。校验失败时显示失败路径与原因，明确标记整份调用结果未发布；不展示可供后续引用的部分导入结果。Gate AI 和 Refinement 的证据使用同一视图，Script Gate 只显示其返回且通过校验的类型化引用。
 
-汇聚节点列出未满足前驱、实际合并顺序、来源、共同祖先与冲突清单；preparing 显示输入尚未形成，blocked、stale 和 cancelled 显示原因。运行页分别显示「节点执行完成 / 集成中」「运行完成 / 待交付」「已交付」；集成失败显示 IntegrationReport、ErrorRecord 和错误 Gate，不显示为 completed。
+汇聚节点列出未满足前驱、实际合并顺序、来源、共同祖先与冲突清单；preparing 显示输入尚未形成，blocked、stale 和 cancelled 显示原因。运行页分别显示「筛选中 / 等待采用」「节点执行完成 / 集成中」「运行完成 / 待交付」「已交付」；集成失败显示 IntegrationReport、ErrorRecord 和错误 Gate，不显示为 completed。
 
 Gate 页面固定显示：
 
@@ -151,6 +152,16 @@ Requirement → WorkflowRun → Combination → Attempt
 
 提交前后端校验当前 Attempt、gate_id、review_input_digest、策略、上下文、Tree 和该项前一决策；Runtime 校验最新文件摘要。其他 Gate 的并发更新不要求重新审核未变的材料；当前项或材料过期时重新载入。已提交 Decision 不编辑。其它 clone 的用户通过拥有者服务提交决定；仅有 Git 档案不能接管活动 Worker。最终 Delivery 页面始终要求人类确认。
 
+## 运行前筛选交互
+
+Workflow 编辑页分别选择 global / parallel 与 automatic / human，不把它们合并成 Gate 模式；runner 可单独指定。静态 Workflow 预览仍不调用 Agent，需求相关筛选在 Run 启动后展示。
+
+Run 页面并列提供原图、逐组合判断及候选执行图，显示模式、分项进度、keep / exclude / defer、理由和证据；尚未采用时明确标为候选，不展示虚假的 Attempt 或代码输出。automatic 成功后显示采用记录，human 展示一次集中确认入口。用户可恢复 exclude 节点或保留完整图，不能额外排除 keep / defer 节点或修改边；每次恢复后重新计算图和确认摘要。
+
+全部 exclude 时显示“没有可执行节点，等待人工处理”，不能自动确认。用户可恢复至少一个节点后确认、显式重筛或停止。调用失败与有效 defer 区分展示；失败通过错误 Gate 重筛，不能用部分成功结果启动节点。CLI 与 WebUI 共用相同的报告查询、恢复节点预览、采用、重筛和停止校验。
+
+采用后，原图中的被排除节点标为“运行前筛选排除”，只链接筛选理由，不伪装成 accepted / not_applicable 的 Attempt；执行图只展示保留节点。已采用图不可重筛或插入节点，需改变范围时创建新 Run。调用详情提供实际输入与独立会话信息，不声称 KV 缓存必然命中。
+
 ## 错误处置与检查
 
 ~~~text
@@ -163,7 +174,7 @@ Workflow 错误 Gate：human / ai_assisted / ai / script
     └── 停止 → 取消 Run
 ~~~
 
-错误页以 ErrorRecord 为审核对象，区分 scope=combination 与 integration；未形成的输入、Snapshot 和输出显示“尚未形成”，不显示虚假 Diff。明确展示“处置动作”，不使用“批准成果”按钮。查看旧 Attempt 时保留 failed / rejected，不把恢复获准显示成 accepted。`wait` 仅在固定外部引用仍暂不可读时可选，显示被固定的引用与 Runtime 的可用性检查；引用恢复后禁用 wait，用户可请求按原 Gate 模式重新评估，并沿用原 Context Snapshot。需要新输入时显示创建新 Run；需求内容变化另建新 UUID。可显式停止同 Runtime 的旧 Run，不展示跨 clone 自动取消承诺。
+错误页以 ErrorRecord 为审核对象，区分 scope=combination、selection 与 integration；未形成的输入、Snapshot 和输出显示“尚未形成”，不显示虚假 Diff。明确展示“处置动作”，不使用“批准成果”按钮。查看旧 Attempt 时保留 failed / rejected，不把恢复获准显示成 accepted。`wait` 仅在固定外部引用仍暂不可读时可选，显示被固定的引用与 Runtime 的可用性检查；引用恢复后禁用 wait，用户可请求按原 Gate 模式重新评估，并沿用原 Context Snapshot。需要新输入时显示创建新 Run；需求内容变化另建新 UUID。可显式停止同 Runtime 的旧 Run，不展示跨 clone 自动取消承诺。
 
 同时展示 `检查修复：已用 / max_check_retries` 与 `自动恢复：auto_recoveries_used / max_auto_recoveries`，前者属于 Attempt，后者属于整个 Run。每轮通过 CheckReport 显示 Tree、全部检查结果及证据；error / not_run 与 failed 分开显示，代码变化后旧通过结果标为历史，不能代表新 Tree。
 

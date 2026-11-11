@@ -9,8 +9,10 @@ flowchart LR
     R[本地 Requirement 草稿] --> F[冻结 requirement_ref]
     F --> WR[WorkflowRun]
     SC[source_commit：代码与定义基线] --> WR
-    DAG[dag.yaml] --> WR
-    WR --> CR[CombinationRun]
+    DAG[source-dag.yaml] --> WR
+    WR --> SEL[筛选与采用]
+    SEL --> ED[固定 dag.yaml]
+    ED --> CR[CombinationRun]
     CR --> AT[Attempt]
     AT --> G[检查与 Gate，本地生效]
     G --> I[最终集成与人类确认]
@@ -20,7 +22,8 @@ flowchart LR
 | 对象 | 身份与边界 |
 | --- | --- |
 | Requirement | 一个明确目标及验收条件；冻结后内容不可变 |
-| WorkflowRun | 固定需求、代码与定义基线、组合 DAG 的一次运行；同一需求可有多次运行 |
+| WorkflowRun | 固定需求、代码与定义基线，筛选后采用执行 DAG 的一次运行；同一需求可有多次运行 |
+| SelectionReport | 一轮需求适用性筛选结果；不属于 Attempt，采用前只作候选 |
 | CombinationRun | Run 中一个业务节点的状态；同一节点最多一条 |
 | Attempt | 节点的一次准备、执行与审核；重试创建新 Attempt |
 | DeliveryRecord | 一次成功采纳的不可变回执；与成果同 Commit 保存 |
@@ -174,16 +177,19 @@ WorkflowRun 的必需字段如下：
 | `replaces_run_id` | 是 | 显式替代的本地未终态 Run；同一 owner_runtime_id，普通运行填 null。按启动流程先停止旧 Run，再创建新 Run；跨 clone 不传递取消控制。 |
 | `workflow_id` | 是 | `source_commit` 中使用的 Workflow 稳定 ID。 |
 | `workflow_path` | 是 | `source_commit` 中 Workflow 定义的仓库相对路径。 |
-| `dag_snapshot_ref` | 是 | 运行目录内 `dag.yaml` 的固定相对路径；本地和最终档案使用相同布局。 |
-| `dag_digest` | 是 | `dag_snapshot_ref` 文件字节的 SHA-256 摘要；不是 Git Commit。 |
+| `source_dag_ref`、`source_dag_digest` | 是 | source-dag.yaml 相对路径及文件字节 SHA-256；Run 创建时固定的静态组合图。 |
+| `selection` | 是 | 有效 mode、confirmation、runner_id、runner_profile_digest、固定筛选 instruction 与 policy_digest；创建后不变，协议见 Execution。 |
+| `selection_report_ref` | 是 | 当前筛选轮次的 SelectionReport 类型化引用，初始 null；重试时清空，采用后固定。 |
+| `selection_adoption` | 是 | 筛选采用记录，初始 null；与执行图同事务设置一次。 |
+| `dag_snapshot_ref`、`dag_digest` | 是 | 筛选采用前均为 null；采用时固定为 dag.yaml 及文件字节 SHA-256；之后不改写。 |
 | `owner_runtime_id` | 是 | 创建运行的 clone-local Runtime UUIDv4；标识本 Run 唯一调度和记录写入者。 |
 | `status` | 是 | WorkflowRun 当前状态。 |
 | `error_gate` | 是 | 完整有效错误策略及 `policy_digest`，含模式、完整 evaluator、审核上下文、来源路径和自动恢复上限；启动时固定。 |
-| `runners` | 是 | runner_id → `{profile, source_refs, profile_digest}` 的不可变映射，覆盖执行及 AI 评估所需调用配置。 |
+| `runners` | 是 | runner_id → `{profile, source_refs, profile_digest}` 的不可变映射，覆盖筛选、执行及 AI 评估所需调用配置。 |
 | `merge_engine` | 是 | Runtime 在创建 Run 时固定的 Git 版本、不可变环境引用及有效合并参数；结构见 Execution，Run 内不可切换。 |
 | `integration_report_ref` | 是 | 最新 IntegrationReport 类型化引用，初始 null；仅对应当前有效终端成果。修复或重检开始时清空，历史报告保留；completed 后绑定成功报告，不再替换。 |
-| `active_error_ref` | 是 | 当前集成错误的 ErrorRecord 引用，初始 null；节点错误仍由 CombinationRun 保存。 |
-| `error_report_ref`、`error_decision_ref` | 是 | 当前集成错误的最新报告与决定，初始 null；处置结束或失效时连同 active_error_ref 清空，历史文件保留。 |
+| `active_error_ref` | 是 | 当前筛选或集成错误的 ErrorRecord 引用，初始 null；节点错误仍由 CombinationRun 保存。 |
+| `error_report_ref`、`error_decision_ref` | 是 | 当前 Run 级错误的最新报告与决定，初始 null；处置结束或失效时连同 active_error_ref 清空，历史文件保留。 |
 | `auto_recoveries_used` | 是 | 已安排的自动恢复动作次数，初始 0；与动作意图在同一事务递增，重启不重置。 |
 | `status_reason` | 条件 | `blocked` 或 `cancelled` 时的原因；结构见本节。 |
 | `delivery_abandonment` | 否 | 人类放弃未交付成果时记录 confirmed_by、非空 reason 和 confirmed_at；存在时不可交付。 |
@@ -192,29 +198,34 @@ WorkflowRun 的必需字段如下：
 启动流程：
 
 1. 校验人类确认的冻结绑定；“冻结并启动”先按起草协议确认当前摘要并完成冻结。检查 UUID 未被采纳，再读取本地 main 完整 OID 为 source_commit，无需 remote 或先 fetch。
-2. 按 [定义保存与生效边界](01-workflow.md#保存与生效边界) 检查工作区和索引中的定义及引用资料，无未提交改动后，只从 source_commit 校验 Workflow、Facet、必要检查、非空 integration.checks、runner、成果及错误 Gate、评估器和资料。拒绝用运行档案作定义输入，也不能将工作区预览直接作为 Run 的图。
-3. 生成并校验 DAG。若显式替代本地未终态 Run，先在旧 Run 锁下持久化替代操作 ID、新 run_id、调度撤销与停止意图，释放锁后再创建新 Run；旧 Run 已停止而新建失败时，以同一操作 ID 幂等重试，不恢复旧执行。不同时持两个 Run 锁。将新 run.yaml、dag.yaml、冻结需求引用及初始状态原子持久化。
-4. 再次校验 main 的正式输入仍匹配 source_commit、需求尚未采纳，然后调度节点。启动不写 main；正式输入变化则阻塞，要求固定新基线的新 Run。
+2. 按 [定义保存与生效边界](01-workflow.md#保存与生效边界) 检查工作区和索引中的定义及引用资料，无未提交改动后，只从 source_commit 校验 Workflow、Facet、selection、必要检查、非空 integration.checks、执行与筛选 runner、成果及错误 Gate、评估器和资料。拒绝用运行档案作定义输入，也不能将工作区预览直接作为 Run 的图。
+3. 生成并校验 source-dag。若显式替代本地未终态 Run，先在旧 Run 锁下持久化替代操作 ID、新 run_id、调度撤销与停止意图，释放锁后再创建新 Run；旧 Run 已停止而新建失败时，以同一操作 ID 幂等重试，不恢复旧执行。不同时持两个 Run 锁。将新 run.yaml、source-dag.yaml、冻结需求引用及初始状态原子持久化；此时尚无执行图。
+4. 再次校验正式输入与采纳历史，进入 selecting 并发起筛选；完整报告按配置自动采用或等待人工确认。采用记录、dag.yaml、摘要与 running 状态同事务落地后才调度节点。启动不写 main；正式输入变化则阻塞，要求固定新基线的新 Run。
 
-输入、`replaces_run_id`、`runners`、`error_gate`、`merge_engine` 和 `owner_runtime_id` 创建后不变。状态、原因与更新时间通过本地事务推进；不得在原 Run 修改 source_commit 或 requirement_ref。交付基线规则见 [Execution](04-execution.md)。
+输入、`source_dag_ref`、`source_dag_digest`、`selection`、`replaces_run_id`、`runners`、`error_gate`、`merge_engine` 和 `owner_runtime_id` 创建后不变。状态、原因与更新时间通过本地事务推进；不得在原 Run 修改 source_commit 或 requirement_ref。交付基线规则见 [Execution](04-execution.md)。
 
 | 状态 | 定义 |
 | --- | --- |
-| `pending` | 已创建，尚未开始调度。 |
+| `pending` | 已创建静态图，尚未开始筛选。 |
+| `selecting` | 正在整体筛选或并发预筛选，尚无业务 Attempt。 |
 | `running` | 正在调度或执行；Combination 可处于不同状态。 |
 | `integrating` | 全部业务节点 satisfied，Runtime 正在汇聚终端成果并执行最终集成检查。 |
-| `blocked` | 节点阶段没有可继续推进的工作，或集成失败等待错误处置、材料或人工协调；条件满足后可恢复。 |
-| `completed` | 所有业务节点 satisfied，且当前有效 IntegrationReport 为 passed；候选与报告已固定，等待人类确认交付。 |
+| `blocked` | 筛选等待确认、全部排除或失败；或节点、集成阶段等待处置与外部条件。status_reason 区分原因。 |
+| `completed` | 执行图中所有业务节点 satisfied，且当前有效 IntegrationReport 为 passed；候选与报告已固定，等待人类确认交付。 |
 | `cancelled` | 已停止调度；活动 Attempt 已取消或停止请求已持久化。 |
 
-cancelled 表示停止调度；Worker 与集成检查进程是否实际退出单独展示。交付在途时先按 [Services](05-services.md) 对账 main，再决定是否可取消或放弃。
+cancelled 表示停止调度；筛选调用、Worker 与集成检查进程是否实际退出单独展示。交付在途时先按 [Services](05-services.md) 对账 main，再决定是否可取消或放弃。
 
 `completed` 和 `cancelled` 为终态；需要改变已完成运行的输入、成果或重新验证时创建新 WorkflowRun。状态转换如下。
 
 ```mermaid
 stateDiagram-v2
     [*] --> pending
-    pending --> running
+    pending --> selecting
+    selecting --> running: 筛选采用与执行图落地
+    selecting --> blocked: 确认、全部排除或错误
+    selecting --> cancelled
+    blocked --> selecting: 显式重试筛选
     pending --> cancelled
     running --> blocked
     running --> integrating: 全部节点 satisfied
@@ -229,6 +240,8 @@ stateDiagram-v2
     cancelled --> [*]
 ```
 
+筛选等待人工确认或全部排除时为 blocked，采用后转 running；筛选失败按错误 Gate 重试转 selecting。筛选与采用均不能在已有 selection_adoption 后重做。
+
 集成失败时，即使自动错误 Gate 正在评估，Run 也保持 blocked；决定落地后，retry_integration 转 integrating，repair_combination 转 running。状态原因及集成错误引用区分等待处置与节点等待，不新增 IntegrationRun。
 
 本地事务提交并完整落地后，报告、决策、accepted / satisfied 和恢复动作生效；全部成果 Gate 批准才解锁后继。无需向 main 发布正式审核请求或中间状态。事务失败不暴露半状态，恢复先重放再调度；Git 同步状态不进入运行状态机。
@@ -239,14 +252,15 @@ stateDiagram-v2
 .facetloom/runs/<run-id>/
 ├── run.yaml
 ├── summary.md                           # 结果、返工原因、未解决问题
-├── dag.yaml
+├── source-dag.yaml                      # 静态组合图
+├── dag.yaml                             # 筛选后实际执行图
 ├── contexts/<sha256>.yaml
 ├── combinations/<sha256>.yaml
 ├── attempts/<attempt-id>.yaml
 ├── errors/<error-id>.yaml
 ├── checkpoints/<checkpoint-id>.yaml
 ├── decisions/<decision-id>.yaml
-├── reports/<report-id>.yaml              # CheckReport / GateReport / IntegrationReport
+├── reports/<report-id>.yaml              # SelectionReport / CheckReport / GateReport / IntegrationReport
 └── deliveries/<delivery-id>.yaml
 ```
 
@@ -254,7 +268,7 @@ stateDiagram-v2
 
 | 归档内容 | 选择规则 |
 | --- | --- |
-| run.yaml、summary.md、dag.yaml | 必选，概括目标、最终结果、关键返工与未解决问题 |
+| run.yaml、summary.md、source-dag.yaml、dag.yaml、已采用 SelectionReport | 必选，保留筛选依据、排除集合、最终结果与关键返工 |
 | CombinationRun 与 accepted Attempt | 每个业务节点的最终有效状态与成果必选 |
 | Snapshot、检查、Checkpoint、成果决策、IntegrationReport、DeliveryRecord | 保留上述成果的全部必需依据及引用闭包 |
 | 历史失败、拒绝和错误处置 | 选取能解释最终成果的必要记录；被保留对象引用时必须收录 |
@@ -285,8 +299,19 @@ source_commit: 8b8c0f1...
 replaces_run_id: null
 workflow_id: development
 workflow_path: .facetloom/workflows/development.yaml
-dag_snapshot_ref: dag.yaml
-dag_digest: sha256:7d9a...
+source_dag_ref: source-dag.yaml
+source_dag_digest: sha256:<source-dag-digest>
+selection:
+  mode: global
+  confirmation: automatic
+  runner_id: developer
+  runner_profile_digest: sha256:<profile-digest>
+  instruction: 按冻结需求及组合职责逐项返回 keep、exclude 或 defer，说明依据；不得以缺少尚未生成的代码排除验证职责。
+  policy_digest: sha256:<selection-policy-digest>
+selection_report_ref: null
+selection_adoption: null
+dag_snapshot_ref: null
+dag_digest: null
 owner_runtime_id: 7a93f6e2-5e63-4431-aec9-502b910cc114
 status: pending
 error_gate:
@@ -332,7 +357,7 @@ updated_at: "2026-11-04T12:00:00Z"
 
 ## CombinationRun
 
-CombinationRun 是一个业务 Combination 在某个 WorkflowRun 中的状态记录，唯一键为 `(run_id, combination_id)`。每个业务节点至多一条，控制节点不创建记录；尚未创建等同 pending。只有全部业务直接前驱 satisfied 时可准备执行；start 视为已满足。
+CombinationRun 是实际执行图中的一个业务 Combination 在某个 WorkflowRun 中的状态记录，唯一键为 `(run_id, combination_id)`。每个业务节点至多一条，控制节点不创建记录；尚未创建等同 pending。只有全部业务直接前驱 satisfied 时可准备执行；start 视为已满足。
 
 ```mermaid
 stateDiagram-v2
@@ -425,9 +450,9 @@ updated_at: "2026-11-09T12:00:00Z"
     └── stop_run → 取消未结束运行
 ```
 
-恢复动作必须引用错误决定。自动恢复预算按整个 Run 共享，默认 3 次；retry_current、repair_upstream、retry_integration、repair_combination 每次各计一次；一次修复触发的后继重执行不另计。AI/脚本决定安排恢复时，Runtime 在同一事务中记录动作 ID、消耗额度和失效范围；重复重放不再扣减。额度耗尽后，自动评估器不能安排恢复；人类仍可决定恢复，或停止 Run。人工及 ai_assisted 人类确认的恢复不消耗自动额度，也不重置已有计数。
+恢复动作必须引用错误决定。自动恢复预算按整个 Run 共享，默认 3 次；retry_current、repair_upstream、retry_selection、retry_integration、repair_combination 每次各计一次；一次修复触发的后继重执行不另计。AI/脚本决定安排恢复时，Runtime 在同一事务中记录动作 ID、消耗额度和失效范围；重复重放不再扣减。额度耗尽后，自动评估器不能安排恢复；人类仍可决定恢复，或停止 Run。人工及 ai_assisted 人类确认的恢复不消耗自动额度，也不重置已有计数。
 
-节点错误的 repair_upstream 目标只能是当前节点的祖先；当前节点重试使用 retry_current。集成错误的 repair_combination 可选同 Run 的任一业务节点；动作协议见 [错误 Gate](03-governance.md#错误评估协议与决定)。Runtime 原子清除修复目标和全部可达后继的有效成果引用，持久化停止意图，拒收迟到任务结果；无依赖分支继续。目标在其前驱满足后 pending，后继依次等待新成果。历史 accepted、rejected 和 failed Attempt 不改写。
+节点错误的 repair_upstream 目标只能是当前节点的祖先；当前节点重试使用 retry_current。集成错误的 repair_combination 可选同 Run 已采用执行图中的任一业务节点；动作协议见 [错误 Gate](03-governance.md#错误评估协议与决定)。Runtime 原子清除修复目标和全部可达后继的有效成果引用，持久化停止意图，拒收迟到任务结果；无依赖分支继续。目标在其前驱满足后 pending，后继依次等待新成果。历史 accepted、rejected 和 failed Attempt 不改写。
 
 每个新 Attempt 仍按根基线或当前有效前驱构造输入；旧成果仅作只读参考，不自动成为输入。触发决定固定在 recovery_decision_ref，修复材料进入 Snapshot.recovery_context，具体字段、旧成果选取及连续恢复规则见 [恢复上下文与旧成果](04-execution.md#恢复上下文与旧成果)。新 Attempt 的全部成果 Gate 仍须重新审核。
 
@@ -450,7 +475,7 @@ status_reason:
       digest: sha256:<digest>
 ```
 
-code 为机器可读字符串，message 非空，related_refs 使用 Execution 的类型化引用。常用码包括 integration_failed、integration_blocked、preparation_failed、pre_assess_blocked、pre_assess_failed、post_assess_failed、evidence_import_failed、evidence_reference_invalid、worker_lost、execution_failed、gate_rejected、gate_pending、upstream_invalidated、upstream_misaligned、requirement_already_adopted、permission_denied、input_conflict、recovery_budget_exhausted、error_gate_failed、user_cancelled。
+code 为机器可读字符串，message 非空，related_refs 使用 Execution 的类型化引用。常用码包括 selection_pending_confirmation、selection_empty、selection_failed、integration_failed、integration_blocked、preparation_failed、pre_assess_blocked、pre_assess_failed、post_assess_failed、evidence_import_failed、evidence_reference_invalid、worker_lost、execution_failed、gate_rejected、gate_pending、upstream_invalidated、upstream_misaligned、requirement_already_adopted、permission_denied、input_conflict、recovery_budget_exhausted、error_gate_failed、user_cancelled。
 
 ## Attempt
 

@@ -29,9 +29,9 @@ CLI 随各阶段提供可操作的验证入口。每阶段完成验收后进入�
 **验收条件：**
 
 - 可视化编辑所需的服务协议先通过 CLI 验证：工作区与 main 读取分开，保存校验摘要和全部受影响引用，发布只提交明确选择且重新校验的文件；多文件保存和 Git 发布中断可对账，不覆盖外部改动。
-- 相同定义生成相同 DAG；Facet 顺序、分支、汇聚和排除后的关系符合设计；补边遍历顺序不影响最终约简边集。
-- 缺少 integration.checks 的工作区草稿允许保存与图预览，但标为不可运行；发布与启动要求非空、有效的集成检查。
-- 错误引用、环、悬空节点及全部节点被排除时拒绝生成运行；能查看每个 Combination 的 Gate 继承结果，runner、原生配置或评估器缺失、错配可定位；Run 完整固定执行与 AI 评估的调用配置及来源。
+- 相同定义生成相同静态 source-dag，相同原图和最终排除集合生成相同执行图；Facet 顺序、分支、汇聚和排除后的关系符合设计；补边遍历顺序不影响最终约简边集。
+- 缺少 selection.mode / confirmation 或 integration.checks 的工作区草稿允许保存与图预览，但标为不可运行；发布与启动要求完整筛选配置及非空、有效的集成检查。
+- 错误引用、环、悬空节点及静态 exclude 排除全部节点时拒绝生成运行；能查看每个 Combination 的 Gate 继承结果，runner、原生配置或评估器缺失、错配可定位；Run 完整固定执行与 AI 评估的调用配置及来源。
 
 - 手动起草不依赖 Agent 或 Workflow；初始模式为 ai_assisted，默认值只用于新需求，逐需求选择独立保存。冻结核对人类确认的字节摘要。此阶段不发起 AI 调用。
 
@@ -39,10 +39,11 @@ CLI 随各阶段提供可操作的验证入口。每阶段完成验收后进入�
 
 **依赖：** 阶段 1 的有效定义与 DAG。
 
-**交付物：** 稳定的 clone-local Runtime 身份；WorkflowRun、CombinationRun、Attempt 的文件事务及崩溃重放；preparing 阶段与 ErrorRecord；单 Worker 的 detached Worktree、预装外部 Agent 的 Podman 镜像及首个非交互 CLI Adapter；Worker / Invocation / 原生会话的独立记录；统一 Agent 证据导入协议；保留 Scope 分组的 Context Snapshot、实际初始请求留存、CheckReport、Checkpoint 和本地内容寻址 Artifact 库；本地记录与 main 写入隔离；CLI 启动和查看；复用 Adapter 的独立需求起草调用、候选写回与 Diff、取消和恢复，以及 requirement 起草 CLI。
+**交付物：** global / parallel 运行前筛选、SelectionReport、source-dag 与执行图及 automatic / human 采用协议；稳定的 clone-local Runtime 身份；WorkflowRun、CombinationRun、Attempt 的文件事务及崩溃重放；preparing 阶段与 ErrorRecord；单 Worker 的 detached Worktree、预装外部 Agent 的 Podman 镜像及首个非交互 CLI Adapter；Worker / Invocation / 原生会话的独立记录；统一 Agent 证据导入协议；保留 Scope 分组的 Context Snapshot、实际初始请求留存、CheckReport、Checkpoint 和本地内容寻址 Artifact 库；本地记录与 main 写入隔离；CLI 启动和查看；复用 Adapter 的独立需求起草调用、候选写回与 Diff、取消和恢复，以及 requirement 起草 CLI。
 
 **验收条件：**
 
+- Run 先 selecting；两种筛选模式独立于确认方式，完整报告采用后才冻结执行图并创建业务 Attempt。工作区静态预览不发起筛选；被排除节点无 Attempt，defer 保留，后续 Pre-Assess 仍执行。
 - 根节点从 preparing 执行到成果 waiting_gate；独立只读 Pre-Assess 先判断输入与适用性，输入不足或结果无效进入错误 Gate；不适用跳过执行但仍检查和审核。Adapter 解析原生 ExecutionResult，Runtime 结合预检与 Git Tree 判定 outcome；适用任务检查失败同次最多修复并重检 2 次，代码变化后全量重检。Post-AssessReport 与 CheckReport 均绑定最终 Tree，完整材料才本地冻结并进入 Gate。
 - 固定代码和证据可恢复、摘要可校验；执行失败、取消和本地持久化失败可查询，不丢失恢复意图。
 - 无 remote、离线或 main 仅有普通代码未提交时仍可本地执行与审核；未提交定义及引用资料阻止新 Run；创建 Run、执行、检查和 Gate 均不改变 main。事务提交及崩溃重放不暴露半状态。
@@ -60,7 +61,7 @@ CLI 随各阶段提供可操作的验证入口。每阶段完成验收后进入�
 
 **依赖：** 阶段 2 本地持久化的固定成果与审核材料。
 
-**交付物：** human、ai_assisted、ai、script 的成果审核与错误处置；按 review_kind 区分的 GateReport 与 GateDecision；通过独立外部 Agent 会话执行 AI 审核，直接执行脚本审核；实际评估请求留存、人工接管与重评；CLI 审核和结果查询。
+**交付物：** 筛选失败的 retry_selection / stop_run 与共享预算；human、ai_assisted、ai、script 的成果审核与错误处置；按 review_kind 区分的 GateReport 与 GateDecision；通过独立外部 Agent 会话执行 AI 审核，直接执行脚本审核；实际评估请求留存、人工接管与重评；CLI 审核和结果查询。
 
 **验收条件：**
 
@@ -82,6 +83,8 @@ CLI 随各阶段提供可操作的验证入口。每阶段完成验收后进入�
 
 **验收条件：**
 
+- 验证 pending → selecting → running 的采用边界；parallel 缺项、无效引用及部分失败不能提前启动，重筛产生完整新轮次；全部 exclude 暂停人工处理，不创建空执行图或自动恢复循环。
+- 两种筛选模式、两种确认方式、恢复 exclude 节点、确认摘要过期、取消及迟到输出按协议处理；共享自动恢复额度，崩溃重放不重复调用/采用。实际请求可追溯，不假定 KV 缓存命中。
 - 验证 Run 的 running → integrating → completed，以及集成错误的 blocked → running / integrating；ErrorRecord 按 scope 定位对象，集成恢复不创建虚假 Attempt。
 - 集成冲突、检查失败和环境错误均经四种错误 Gate 模式处置；修复目标及后继重执行和审核，无关成果保留。重检与修复共用 Run 的自动预算；迟到报告、取消、重复决定和崩溃重放不能重复推进或扣减。
 - 恢复 Attempt 固定 recovery_decision_ref；失效事务先保存旧来源，Snapshot.recovery_context 引用决定、上一 Attempt 和证据。Agent 在当前 DAG 输入上参考旧成果，不自动迁移代码。连续恢复保留未完成要求，固定引用恢复可复用原 Snapshot；无旧输出、材料缺失、指令冲突及崩溃重放均有明确结果，恢复引用纳入导出与清理保护。
@@ -102,7 +105,7 @@ CLI 随各阶段提供可操作的验证入口。每阶段完成验收后进入�
 
 **依赖：** 阶段 4 的完整运行能力与真实运行档案。
 
-**交付物：** Requirement 起草模式切换、独立 runner、草稿编辑、候选 Diff、问题与冻结确认页面；Workflow / Facet 源 DAG 与属性可视化编辑、只读组合预览、共享影响 Diff、工作区保存和提交发布；运行状态、Diff、证据、成果审核、错误处置与双重预算、交付页面及 runner、调用和停止对账详情；Artifact 可用性、交换包与本地清理页面；运行精炼的独立外部 Agent 会话、记录筛选、建议、采纳、验证与清理；精炼 CLI。界面与 CLI 使用相同服务和校验规则。
+**交付物：** Run 筛选进度、源图/执行图对比、逐组合理由、恢复节点与集中确认；Requirement 起草模式切换、独立 runner、草稿编辑、候选 Diff、问题与冻结确认页面；Workflow / Facet 源 DAG 与属性可视化编辑、只读组合预览、共享影响 Diff、工作区保存和提交发布；运行状态、Diff、证据、成果审核、错误处置与双重预算、交付页面及 runner、调用和停止对账详情；Artifact 可用性、交换包与本地清理页面；运行精炼的独立外部 Agent 会话、记录筛选、建议、采纳、验证与清理；精炼 CLI。界面与 CLI 使用相同服务和校验规则。
 
 **验收条件：**
 

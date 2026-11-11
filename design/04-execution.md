@@ -46,6 +46,84 @@ sequenceDiagram
 
 本地 waiting_gate 事务落地后即可审核，决策及关联状态事务落地后解锁后继。main 暂不可写只影响最终采纳；本地持久化暂不可用则停止相关推进，先恢复事务，不暴露半状态。
 
+## 运行前筛选协议
+
+运行前筛选独立于 Attempt；模式、裁剪与确认规则见 [Workflow](01-workflow.md#运行前适用性筛选)。Run 创建时固定需求、source_commit、source-dag 和 selection。selection.instruction 是按当前筛选协议生成并保存的完整指令，后续重试不重新生成；policy_digest 对其余 selection 字段按 JCS 求 SHA-256，runner 完整配置由 Run.runners 提供。
+
+```text
+Run pending → selecting：保存轮次、任务身份和实际输入 → Agent 筛选
+    ├── 报告 error → blocked → 错误 Gate：retry_selection / stop_run
+    └── 报告 completed
+          ├── 全部 exclude → blocked：人工恢复节点 / 重筛 / 停止
+          ├── confirmation=human → blocked：一次集中确认
+          └── confirmation=automatic → 校验并采用
+                                  ↓
+               selection_adoption + dag.yaml + running 同事务落地
+```
+
+### SelectionReport
+
+路径为 `reports/<report-id>.yaml`，schema_version=1、report_type=selection，创建后不可变。每轮一个汇总报告，分项原始输出通过 Invocation Artifact 留存，不新增节点运行对象。
+
+| 字段 | 定义 |
+| --- | --- |
+| report_id、run_id、selection_round_id | UUIDv4；轮次在调用前分配，重试使用新轮次与报告 ID |
+| source_commit、requirement_ref、source_dag_digest、selection_policy_digest | 固定输入与策略；必须匹配当前 Run |
+| mode、status | global / parallel；completed / error，成功不等于已采用 |
+| results | 按 Combination ID 排序的 `{combination_id, decision, rationale, evidence_refs}` 列表 |
+| invocation_refs | 本轮调用回执的 Artifact 引用；包含实际输入、原生结果与可观测程序信息 |
+| reason、created_at | error 时非空原因，UTC 时间 |
+
+completed 必须恰好覆盖 source-dag 的全部业务节点，decision 仅 keep / exclude / defer，rationale 非空。所有引用须来自提供的材料或统一导入的新证据；exclude 至少引用一项具体需求或职责依据。控制节点、未知/重复 ID、缺项或非法引用均为协议错误，不静默补成 defer。error 报告不作为裁剪依据，results=[]，有效分项与失败原文仍可通过 invocation_refs 查看。
+
+Agent 输出示例；global 返回完整列表，parallel 每次只返回当前组合一项：
+
+```json
+{
+  "schema_version": 1,
+  "results": [
+    {
+      "combination_id": "development/feature:login/layer:domain",
+      "decision": "keep",
+      "rationale": "需求包含连续失败阈值和限制期，需由领域组合实现。",
+      "evidence_refs": []
+    }
+  ],
+  "evidence_files": []
+}
+```
+
+evidence_files 使用统一导入协议，其规范化引用保存在调用回执中；results 中的 evidence_refs 只能使用请求明确提供的类型化引用，不能自行构造新引用。exclude 必须依据已提供的需求或职责资料，新增附件不能代替该依据。Runtime 保存完整实际输入，不能用后来重新生成的提示替代原请求。
+
+### 采用记录
+
+Run.selection_adoption 初始为 null；采用时设置一次，之后不改写。它是运行记录中的固定字段组，不是成果 GateDecision。
+
+| 字段 | 定义 |
+| --- | --- |
+| report_ref | 当前 completed SelectionReport 类型化引用，等于 Run.selection_report_ref |
+| mode | automatic / human；全部排除后恢复节点必须为 human |
+| excluded_ids | 最终排除的 Combination ID，去重后升序排列，只能是报告 exclude 集合的子集 |
+| dag_digest | 实际执行图的字节摘要，等于 Run.dag_digest |
+| input_digest | 对 `{report_ref, excluded_ids, dag_digest}` 的 JCS SHA-256；报告已绑定需求、源图与策略 |
+| adopted_by、adopted_at | automatic 为 Runtime 身份，human 为受信用户身份；UTC 时间 |
+
+确认请求携带 input_digest；服务重新构造候选图和摘要，不信任前端传入的边。automatic 必须使用全部建议排除集合；human 仅在配置要求人工确认或全部排除暂停时采用，可恢复节点，excluded_ids=[] 表示保留完整 source-dag。最终业务节点数必须大于零。新报告、不同恢复节点集合或候选图变化使旧确认失效，报告本身不被修改。
+
+采用事务复核活动轮次、Run 状态、source_commit 的正式输入及需求未采纳，原子保存采用记录、执行图、摘要和 running 状态。重复确认返回既有采用结果；不同确认不能覆盖它。所有筛选证据、原图与采用记录纳入既有归档、交换包与清理保护；被排除节点的依据不能因没有 Attempt 而遗漏。
+
+### 调度与失败恢复
+
+每轮在本地操作日志保存 selection_round_id、report_id、全体任务 ID、固定输入摘要及进度；global 一个任务，parallel 按 source-dag 的 Combination ID 分配一个任务。发起调用前先持久化身份和实际输入。各调用使用独立只读容器及新会话，不创建 Attempt / Worker，不挂载可写项目或 Git 管理凭据。
+
+公共前缀按固定顺序放筛选规则、冻结需求和必要项目背景，组合专属上下文置后；parallel 提供完整拓扑的精简职责摘要以定位依赖，不复制其他组合的全部资料。资料均从固定基线解析，不以缺少未来前驱输出为调用错误；无法判断应返回 defer。外部 Agent 的内部提示和缓存策略由其实现决定，不保证 KV 命中。
+
+只有本轮所有分项成功且覆盖完整才发布 completed 报告，不将部分 exclude 提前应用。调用超时、原生失败、无效结构、缺项或证据导入错误使本轮失败；先撤销其余任务并停止或隔离，再保存 error 报告、scope=selection 的 ErrorRecord 与 Run.blocked，交 Workflow 错误 Gate。本地持久化失败先恢复事务，不以半份报告推进。
+
+retry_selection 只在执行图尚未采用、固定输入有效、旧调用已停止或隔离时有效：清空当前筛选报告及 Run 级错误引用，以新轮次完整重筛，不拼接不同轮次分项。AI/脚本重试消耗 Run 自动恢复额度，人类重试不消耗；所有历史报告保留。全部 exclude 是 completed 报告，记录 selection_empty 并等候人工，不创建 ErrorRecord 或自动重试循环；人类可显式重筛、恢复至少一个节点后确认或停止。普通 human 待确认也允许人类显式重筛或停止。完整报告后的人工重筛属于采用前操作，保存操作者、原报告与新轮次的本地操作意图，不伪造错误决定、不消耗自动恢复额度。
+
+取消、显式重筛或基线变化先持久化撤销，迟到输出不得进入当前报告或采用记录。重启重放事务后按 Invocation 身份对账，不重复发起未知调用；重试与确认共用 Run 锁。采用后不再接受筛选重试，若需恢复已排除节点或切换筛选配置则新建 Run。保留节点继续执行固有 Pre-Assess，完整检查和审核规则不变。
+
 ## Context Snapshot
 
 路径：`.facetloom/runs/<run-id>/contexts/<sha256>.yaml`。先在本地运行目录构造，仅最终采纳时随精简档案提交 main。文件按字节 SHA-256 命名，输入变化创建新文件与新 Attempt。
@@ -198,7 +276,7 @@ Adapter 将解析出的必要引用加入本次证据白名单；不存在的旧
 
 ## 前驱代码汇聚
 
-根节点复用 source_commit；直接前驱取最终约简 DAG 快照中每个节点的当前有效输出。只有前驱全部 satisfied 才开始准备。
+根节点复用 source_commit；直接前驱取筛选后已采用的 DAG 快照中每个节点的当前有效输出。只有前驱全部 satisfied 才开始准备。
 
 ```text
 有效前驱及来源映射
@@ -244,7 +322,7 @@ conflicts: []                 # 各步冲突并集；每项含确定性 conflict
 
 ## Agent 输出证据协议
 
-Pre-Assess、执行/修复、Post-Assess、AI Gate 与 Refinement 的外部 Agent 使用同一证据输出协议。每次 Invocation 获得一个全新的专用可写目录 `evidence-out/`，在容器内固定挂载为 `/facetloom/evidence-out`；它只用于提交本次调用生成的证据，不是项目工作目录。调用输入明确指示 Agent 将新文件写入该目录，并在结构化输出的 `evidence_files` 中给出相对路径。已有证据仍通过 `evidence_refs` 引用，但每个引用必须与本次 Invocation 输入中的引用完全一致；不得自行构造 URI 或引用未提供的 Artifact。
+筛选、Pre-Assess、执行/修复、Post-Assess、AI Gate 与 Refinement 的外部 Agent 使用同一证据输出协议。每次 Invocation 获得一个全新的专用可写目录 `evidence-out/`，在容器内固定挂载为 `/facetloom/evidence-out`；它只用于提交本次调用生成的证据，不是项目工作目录。调用输入明确指示 Agent 将新文件写入该目录，并在结构化输出的 `evidence_files` 中给出相对路径。已有证据仍通过 `evidence_refs` 引用，但每个引用必须与本次 Invocation 输入中的引用完全一致；不得自行构造 URI 或引用未提供的 Artifact。
 
 Adapter 逐个验证并导入文件到不可变 Artifact Store，之后把 Agent 引用与新生成的类型化 Artifact 引用合并到规范化结果的 `evidence_refs`。Agent 引用必须是本次输入白名单中的引用且不得重复；规范化结果按 Agent 引用的原有次序保留，再按 `evidence_files` 声明次序追加导入引用。导入引用包含 URI、内容摘要和媒体类型；Invocation 记录提交路径、摘要及导入结果。`evidence_files` 只存在于 Agent 原始输出，不写入正式 Report、GateReport 或 Decision。
 
@@ -276,11 +354,11 @@ evidence_imports:
 
 导入器只接受专用目录内的普通文件；调用结束并确认容器退出后冻结目录，再拒绝绝对路径、`.` / `..` 路径段、非规范相对路径、反斜线、任一层级的符号链接、硬链接、重复路径、目录及其它非普通文件。每次调用最多 100 个文件，单文件最多 10 MiB，合计最多 100 MiB。Adapter 先把全部文件暂存并验证摘要，再一次性发布导入清单；任一文件校验、读取或持久化失败时，整份结构化结果无效，不发布部分 Report 或 `evidence_refs`。未引用的暂存 Artifact 不作为运行证据，可在确认无引用后清理。
 
-Agent 可以省略 `evidence_files`，视为空列表。无效路径、超限、重复/未提供的引用或证据导入失败均使该调用无效。Worker 的 Pre-Assess、执行与 Post-Assess 故障进入 Workflow 错误 Gate；AI Gate 以 `GateReport.status: error` 交人类接管，不递归调用错误 Gate；Refinement 保留失败会话供人处理。Adapter 不猜测、改写或补造证据。Script Gate 继续直接返回已校验的类型化 `evidence_refs`，不使用文件导入协议。
+Agent 可以省略 `evidence_files`，视为空列表。无效路径、超限、重复/未提供的引用或证据导入失败均使该调用无效。筛选故障按 selection 范围进入 Workflow 错误 Gate；Worker 的 Pre-Assess、执行与 Post-Assess 故障按节点范围进入错误 Gate；AI Gate 以 `GateReport.status: error` 交人类接管，不递归调用错误 Gate；Refinement 保留失败会话供人处理。Adapter 不猜测、改写或补造证据。Script Gate 继续直接返回已校验的类型化 `evidence_refs`，不使用文件导入协议。
 
 ## Pre-Assess
 
-每个 Attempt 先由 Adapter 使用固定 runner 发起独立只读调用与新原生会话。输入为 Context Snapshot、Requirement、选中 Node 上下文及已接受前驱证据；不挂载可写 Worktree、Git 凭据、Git 元数据或 Podman Socket。Adapter 必须在 `probe` 时确认原生结构化输出能力，不从自然语言推测字段。
+筛选采用后，每个保留节点的 Attempt 仍先由 Adapter 使用固定 runner 发起独立只读调用与新原生会话。输入为 Context Snapshot、Requirement、选中 Node 上下文及已接受前驱证据；不挂载可写 Worktree、Git 凭据、Git 元数据或 Podman Socket。Adapter 必须在 `probe` 时确认原生结构化输出能力，不从自然语言推测字段。
 
 ~~~json
 {

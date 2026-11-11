@@ -45,7 +45,7 @@ flowchart LR
 
 保存请求为一批 `writes`，每项含仓库相对 path、before_digest 和完整 UTF-8 content；新增的 before_digest 为 null，删除的 content 为 null。请求来自 UI 缓冲区或 CLI stdin。目标限于 Workflow、Facet、Scope 定义文件；runner、evaluator 和资料可通过文本编辑维护。拒绝越界、重复目标、符号链接以及 `.runtime/`、runs/、Requirement 正文作为目标。
 
-1. 在内存中应用整批候选，校验文件、引用及所有受影响 Workflow。缺少或空的 integration.checks 仅在工作区保存时作为“不可运行”诊断；其他结构、引用或图错误拒绝保存，保持磁盘内容及编辑缓冲区。发布与启动使用完整校验，要求非空、有效的集成检查。
+1. 在内存中应用整批候选，校验文件、引用及所有受影响 Workflow。缺少 selection.mode / confirmation 或缺少、空的 integration.checks 仅在工作区保存时作为“不可运行”诊断；其他结构、引用或图错误拒绝保存，保持磁盘内容及编辑缓冲区。发布与启动使用完整校验，要求完整筛选配置及非空、有效的集成检查。
 2. 获取 clone 定义写入锁，复核 HEAD、目标摘要及本轮引用文件摘要；新增路径已存在、外部修改或索引有未合并项时拒绝保存。
 3. 在 `.runtime/definition-operations/<operation-id>/` 保存 kind=save、目标清单、前后摘要、原字节、新载荷及 COMMITTED 标记并 fsync。这是恢复日志，不是独立配置版本。
 4. 各文件在目标目录写临时文件、fsync、再次核对原摘要后原子 rename，并 fsync 父目录；删除只移除摘要匹配的目标。全批完成后写 APPLIED。多文件批次未完成时服务拒绝预览、发布和启动，不消费中间状态。
@@ -70,7 +70,8 @@ flowchart LR
 
 | 输入 | 动作 |
 | --- | --- |
-| 固定 DAG、CombinationRun | 调度 pending 且所有直接前驱 satisfied 的节点 |
+| 静态 source-dag 与 selection | 调度 global / parallel 筛选，报告汇总与采用后固定执行图，未采用前不创建业务运行对象 |
+| 固定执行 DAG、CombinationRun | 调度 pending 且所有直接前驱 satisfied 的节点 |
 | 本地 Attempt、Worker 与容器 | 对账、恢复；无法恢复则 failed 并创建 ErrorRecord，不重复启动 |
 | main 正式输入、采纳历史与 replaces_run_id | 检测基线变化、阻止重复采纳；显式替代仅停止同 Runtime 的本地 Run |
 | Gate 报告与决策 | 成果全部批准后以本地事务接受；拒绝转错误 Gate；恢复动作与额度同事务落地后执行 |
@@ -166,12 +167,20 @@ side_effects:
 - 无幂等接口且发送结果未知时，先保留 unknown 并对账；无法确认则等待人类，不自动重发，不保证网络调用恰好执行一次。
 - APPLIED 事务仅在所有必要动作已对账并完成后才可回收；保留本地操作 ID 去重索引。Git 写入结果仍以本地 Git 历史 Trailer 校验，不以可选 SQLite 为唯一依据，也不等待远端同步。
 
+## 筛选调用协调
+
+筛选任务使用 Invocation.owner `{kind: selection, id: <selection-round-id>}`、task_kind=select；global 一次调用，parallel 为每个组合分配独立 invocation_id。各调用从 Run.selection 取得固定 runner、指令和策略，使用只读 source_commit 与引用资料，不挂载可写项目或其它会话，也不需要 Worker / Attempt。
+
+任务的固定输入、分项进度、取消与对账保存在现有本地操作日志；汇总对象与采用事务见 [运行前筛选协议](04-execution.md#运行前筛选协议)。parallel 按稳定 Combination ID 入队，受 clone 本地正整数 `selection_concurrency` 限制（默认 4），并遵守全局进程/资源上限；超限排队不算调用超时。每次调用按固定 runner.timeout_seconds 计时，重启不重置，不重用原生会话串联不同组合。
+
+只有任务身份、轮次与输入摘要匹配的结果才能计入汇总；全部分项成功前不创建有效裁剪图。报告发布、人工确认和自动采用通过同一 Run 锁校验；重复采用返回既有结果。报告、图或恢复节点集合变动后拒绝旧确认，采用成功后拒绝后续重筛与覆盖。实际传入外部 Agent 的输入逐次保存；不根据是否命中模型缓存改变业务结论。
+
 ## Gate 评估协调
 
 这是 Runtime 内的一项职责，不另设持久 GateRun：
 
 1. 启动 Run 时校验成果及错误策略、检查、评估器与引用；错误策略固定在 run.yaml，成果策略在准备成功后固定到 Context Snapshot。能力不足按执行错误或评估器故障分别处理。
-2. 成果材料完整后本地冻结 Attempt.waiting_gate；节点出错或成果拒绝后持久化 ErrorRecord 及 CombinationRun.waiting_gate；集成失败时持久化 IntegrationReport、scope=integration 的 ErrorRecord 与 Run.blocked。本地事务落地后才发起对应成果项或 workflow/error 的正式评估；四种模式共用调用基础设施。
+2. 成果材料完整后本地冻结 Attempt.waiting_gate；节点出错或成果拒绝后持久化 ErrorRecord 及 CombinationRun.waiting_gate；筛选或集成失败时持久化对应报告、scope=selection / integration 的 ErrorRecord 与 Run.blocked。本地事务落地后才发起对应成果项或 workflow/error 的正式评估；四种模式共用调用基础设施。
 3. 调用前保存 report_id、review_input_digest、实际初始评估请求、前一决策 ID 和本地任务状态。保存报告前持久化 request_input_ref，只有请求尚未形成即失败时可为空。任务身份包含 review_kind；错误任务还绑定 error_ref，同一审核对象同时最多一个活动评估。不同项可并行，限制沿用 clone 的并发配置。
 4. 按 review_kind 验证结果或处置动作。成果报告引用更新 Attempt，错误报告按 scope 更新 CombinationRun 或 run.yaml；AI/脚本恢复动作同时校验 Run 级额度和失效范围。评估器自身故障交给人类，不递归调用错误 Gate。
 5. 接管、取消、成果拒绝或输入失效时，先持久化撤销相关任务，再停止进程。成果拒绝只撤销原成果评估，另发起错误审核。重启按 report_id 对账；迟到或已失效任务不能推进状态。
@@ -319,12 +328,12 @@ stopped_at: null
 
 Worker 状态为 pending / running / stop_requested / stopped / unknown，独立于 Attempt 状态。进程引用不能只记 PID：同时记录容器 ID、进程启动身份与 invocation_id，避免 PID 复用误停止其他任务。退出状态以原生调用结果与实际容器对账为准。
 
-Invocation 文件使用以下字段；支持证据文件输出的调用将独立目录挂载为 `/facetloom/evidence-out`。AI Gate、Refinement 和需求起草也共用此记录，不为它们创建业务 Attempt 或 Worker；draft 的 evidence_dir 为 null，evidence_imports 与 evidence_refs 为空列表。
+Invocation 文件使用以下字段；支持证据文件输出的调用将独立目录挂载为 `/facetloom/evidence-out`。筛选、AI Gate、Refinement 和需求起草也共用此记录，不为它们创建业务 Attempt 或 Worker；draft 的 evidence_dir 为 null，evidence_imports 与 evidence_refs 为空列表。
 
 | 字段 | 定义 |
 | --- | --- |
 | schema_version、invocation_id | 格式为 1，调用 ID 为 UUIDv4 |
-| owner、task_kind | owner 为 `{kind: worker/gate/refinement/requirement, id: <所属 ID>}`；task_kind 为 pre_assess / execute / repair / post_assess / evaluate / refine / draft |
+| owner、task_kind | owner 为 `{kind: worker/gate/refinement/requirement/selection, id: <所属 ID>}`；task_kind 为 pre_assess / execute / repair / post_assess / evaluate / refine / draft / select |
 | runner_id、runner_profile_digest | 所属 Run、精炼会话或起草请求内的固定调用配置 |
 | adapter_version、agent_version、image_ref | 实际 Adapter / Agent 版本及镜像 digest；程序尚未探测成功时版本可为 null |
 | argv、input_ref、native_output_ref、result_ref | 实际参数、发送前固定的输入 Artifact、原生结构化输出与 Adapter 规范化结果；不含凭据。失败时规范化结果可为空 |
@@ -340,7 +349,7 @@ Invocation 文件使用以下字段；支持证据文件输出的调用将独立
 
 续接只能引用同一 Attempt 的 execute / repair 调用、相同固定 runner 的原生会话；Post-Assess 不得复用可写执行容器或会话。恢复时重新核实镜像、程序版本及 Adapter 兼容性，不能静默切换运行方式。
 
-runner.timeout_seconds 从首次 Pre-Assess 调用发出前持久化 started_at / deadline_at 开始计时，覆盖预检、执行、同次修复、检查和只读 Post-Assess；排队、输入准备、Gate 等待和最终采纳不计入。Runtime 重启不重置 deadline。达到总时限为 execution_timeout，停止当前调用或检查并保存实际结果，Attempt failed 后转错误 Gate；单个检查自身先超时仍按 CheckReport 的 failed 处理。每次 Agent 调用还受同一 runner.timeout_seconds 单次限制。AI Gate 评估、Refinement 与需求起草不属于 Attempt，采用各自调用的时限。
+runner.timeout_seconds 从首次 Pre-Assess 调用发出前持久化 started_at / deadline_at 开始计时，覆盖预检、执行、同次修复、检查和只读 Post-Assess；排队、输入准备、Gate 等待和最终采纳不计入。Runtime 重启不重置 deadline。达到总时限为 execution_timeout，停止当前调用或检查并保存实际结果，Attempt failed 后转错误 Gate；单个检查自身先超时仍按 CheckReport 的 failed 处理。每次 Agent 调用还受同一 runner.timeout_seconds 单次限制。筛选、AI Gate 评估、Refinement 与需求起草不属于 Attempt，采用各自调用的时限。
 
 ### 停止与恢复
 
@@ -349,7 +358,7 @@ runner.timeout_seconds 从首次 Pre-Assess 调用发出前持久化 started_at 
 3. 确认进程及容器退出后记 stopped，再回收 Worktree、会话与资源额度。查询失败记 unknown，不当作已退出，也不重复启动。
 4. 无法停止则保留资源引用，隔离旧任务并转人工对账。隔离须确认旧任务无法再访问新 Worktree 或受信写入接口；仅写一个“已隔离”标记不够。
 
-Runtime 重启先恢复文件事务，再按容器/Invocation 身份对账；已有活跃进程可重新监控，不新启动第二个进程。只有支持原生恢复且能证明原调用已退出时才恢复同一会话；若不能安全恢复，原 Attempt 失败，经错误 Gate 创建新 Attempt。Gate、精炼和起草调用同样先撤销、再停止，迟到输出不恢复旧任务。
+Runtime 重启先恢复文件事务，再按容器/Invocation 身份对账；已有活跃进程可重新监控，不新启动第二个进程。只有支持原生恢复且能证明原调用已退出时才恢复同一会话；若不能安全恢复，原 Attempt 失败，经错误 Gate 创建新 Attempt。筛选、Gate、精炼和起草调用同样先撤销、再停止，迟到输出不恢复旧任务。
 
 ## 起草调用协调
 

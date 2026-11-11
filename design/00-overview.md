@@ -24,7 +24,9 @@ flowchart LR
     W --> D[Combination DAG]
     S --> WR[WorkflowRun]
     D --> WR
-    WR --> CR[CombinationRun]
+    WR --> SEL[整体筛选 / 并发预筛选]
+    SEL --> ED[采用后固定执行 DAG]
+    ED --> CR[CombinationRun]
     CR --> A[Attempt + Worker]
     A --> C[Checkpoint]
     C --> G[各 Node 的 Gate 全部批准]
@@ -58,6 +60,7 @@ Workflow 与 Facet 可通过源 DAG 画布和属性面板编辑，直接保存�
 | [ErrorRecord](03-governance.md#errorrecord) | 准备、执行或成果拒绝的不可变错误材料 | 本地 errors/，采纳时选入精简档案 |
 | [GateReport](03-governance.md#成果-gatereport-与评估协议) / [GateDecision](03-governance.md#成果-gatedecision) | 成果审核或错误处置的证据与决策 | 本地记录，采纳时加入 main |
 | [CheckReport](04-execution.md#checkreport) | 一个 Attempt 的检查轮次、候选 Tree 与执行结果 | 本地 reports/，采纳时选入精简档案 |
+| [SelectionReport](04-execution.md#selectionreport) | 需求适用性筛选及排除依据；采用记录保存在 run.yaml | 本地记录，采纳时加入 main |
 | [IntegrationReport](04-execution.md#integrationreport) / [DeliveryRecord](04-execution.md#deliveryrecord) | 最终候选、检查与一次成功交付回执 | 本地记录，采纳时加入 main |
 | [Refinement](03-governance.md#refinement运行精炼) | 筛选记录、提出并落实改进的交互过程 | 本地会话；结果体现在 main 的修改与 Commit 描述 |
 | [Worker / Invocation](05-services.md#worker调用与会话) | 一个 Attempt 的执行生命周期及一次外部调用 | clone-local；必要调用证据导出为 Artifact |
@@ -135,14 +138,15 @@ Artifact URI 标识内容，不是下载地址。采纳归档前只要求拥有�
 ├── runs/<run-id>/                        # main 上的精简档案
 │   ├── run.yaml
 │   ├── summary.md
-│   ├── dag.yaml
+│   ├── source-dag.yaml                   # 静态组合图
+│   ├── dag.yaml                          # 筛选后实际执行图
 │   ├── contexts/<sha256>.yaml
 │   ├── combinations/<sha256>.yaml
 │   ├── attempts/<attempt-id>.yaml
 │   ├── errors/<error-id>.yaml
 │   ├── checkpoints/<checkpoint-id>.yaml
 │   ├── decisions/<decision-id>.yaml
-│   ├── reports/<report-id>.yaml           # CheckReport / GateReport / IntegrationReport
+│   ├── reports/<report-id>.yaml           # SelectionReport / CheckReport / GateReport / IntegrationReport
 │   └── deliveries/<delivery-id>.yaml
 └── .runtime/                             # 加入 gitignore
     ├── identity.yaml                     # 当前 clone 的稳定 runtime_id
@@ -170,7 +174,7 @@ Artifact URI 标识内容，不是下载地址。采纳归档前只要求拥有�
 ## 五条不变量
 
 1. **输入固定**：source_commit 固定代码、定义与资料；requirement_ref 固定新需求原始字节。runs/ 不参与项目输入。
-2. **图固定**：一次 Run 的 dag.yaml 创建后不变，重试和恢复复用它；节点替换积与排除算法见 Workflow。
+2. **图固定**：Run 创建时固定 source-dag.yaml；运行前筛选采用后一次固定 dag.yaml，业务节点才开始执行。节点重试和恢复不改图；重新筛选已采用图需新 Run。
 3. **本地执行，一次采纳**：中间状态及 Gate 不写 main；最终一个 Commit 同时包含需求、代码、精简档案和回执。每个需求最多采纳一次，按 UUID 与 Git 历史去重。
 4. **恢复有边界**：本地事务恢复活动运行，Git 恢复已采纳档案；Artifact 另行保留或导入。提交仅在对象库存在不等于采纳成功。
 5. **精炼可追溯**：独立维护提交可清理已处理档案，引用删除前证据；不改写 Git 历史、不自动删除 Artifact。

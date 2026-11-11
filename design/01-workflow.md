@@ -100,7 +100,7 @@ start/end 的控制角色固定，不能转换为普通节点，也不能通过�
 | 源 Facet DAG | 环、自环、重复边、悬空端点、控制边界、start/end 可达性 |
 | 最终组合图 | 有序节点替换积、exclude、桥接、传递约简及结果合法性 |
 
-编辑共享定义时扫描 main 与工作区的 Workflow 引用关系，列出直接和间接受影响项；无法解析的引用标为未完成分析，不能把它们当作“未受影响”。保存批次和发布候选均须通过所有受影响 Workflow 的校验。磁盘上的无效外部编辑可以查看诊断，但不能生成标为有效的最终预览或发布。
+编辑共享定义时扫描 main 与工作区的 Workflow 引用关系，列出直接和间接受影响项；无法解析的引用标为未完成分析，不能把它们当作“未受影响”。保存批次与发布候选分别通过所有受影响 Workflow 的草稿校验与完整运行校验；允许暂缺的筛选或集成配置须显示不可运行诊断。磁盘上的结构、引用或图错误可以查看诊断，但不能生成标为有效的最终预览或发布。
 
 预览展示源图、原始组合节点数、排除后的节点数、最终边数和各节点 members、直接前驱/后继、分支与汇聚；可展开查看命中的 exclude、桥接边和约简删除的边。边来源仅为解释视图，不添加到 dag.yaml 的运行格式。
 
@@ -130,6 +130,9 @@ facets:
 exclude:
   - feature: [notification]
     layer: [application]
+selection:
+  mode: global
+  confirmation: automatic
 execution:
   runner: developer
   checkpoint: git-commit
@@ -157,6 +160,7 @@ integration:
 | name | 否 | 展示名称 |
 | facets | 是 | 按稳定顺序排列的 Facet 引用，至少一个 |
 | exclude | 否 | 静态排除规则，默认空列表 |
+| selection | 发布、启动时必填 | 运行前适用性筛选；方式与结果确认独立配置 |
 | execution | 是 | 外部 Agent 调用配置、检查点、必要检查和修复预算；并发配置见 Services |
 | gate | 否 | 每个普通 Node 继承的默认 Gate 策略 |
 | error_gate | 否 | Workflow 唯一的错误处置策略，独立于各 Node 的成果 Gate |
@@ -166,6 +170,9 @@ Facet 列表顺序定义从外到内的替换顺序：`F1 ▷ F2 ▷ ... ▷ Fn`
 
 | 嵌套字段 | 默认值 | 定义 |
 | --- | --- | --- |
+| selection.mode | 无，必填 | global / parallel，不属于节点 Pre-Assess 的模式 |
+| selection.confirmation | 无，必填 | automatic / human，决定完整筛选结果如何采用 |
+| selection.runner | execution.runner | 独立筛选会话的 runner ID，解析自 source_commit 并固定到 Run.runners |
 | execution.runner | 无，必填 | source_commit 中 runners/<id>.yaml 的调用配置 ID，不使用本地配置兜底 |
 | execution.checkpoint | git-commit | 当前只支持此值；代码输出以 Git Commit 保存 |
 | execution.checks | 空列表 | Workflow 必要检查；与选中 Node 的检查累积 |
@@ -331,7 +338,7 @@ flowchart LR
 
 Snapshot 保存有效输入清单，Adapter 实际发送的预检上下文另通过 Attempt.agent_input_ref 留存。正式 Pre-Assess 使用独立只读调用；缺少输入进入错误 Gate，风险作为证据交给已配置的成果 Gate。适用性与后续执行结果按 [Execution](04-execution.md) 的结构化协议校验；必要测试和只读 Post-Assess 完成后冻结审核输入，再启动各项 Gate。
 
-动态 Applicability 和 Pre-Assess 在 Attempt 中执行，不改变组合 DAG。明确不适用时跳过代码执行但仍完成必要检查、Post-Assess 和所有成果 Gate；无法判断时进入错误 Gate，不能默认跳过 Workflow 要求的验证。
+运行前筛选先确定实际执行 DAG；节点动态 Applicability 和 Pre-Assess 仍在 Attempt 中执行，不再改变已采用的图。明确不适用时跳过代码执行但仍完成必要检查、Post-Assess 和所有成果 Gate；无法判断时进入错误 Gate，不能默认跳过 Workflow 要求的验证。
 
 ### 必要检查
 
@@ -431,7 +438,7 @@ exclude:
     layer: [application]
 ~~~
 
-一条规则中，不同 Facet 的条件为 AND，同一 Facet 列表为 OR；规则之间为 OR。未列出的 Facet 不限。空规则、空列表、未知 Facet、未知 Node 或控制节点 ID 都是配置错误。排除只改变静态 DAG，不由运行时 Applicability 动态增删节点。
+一条规则中，不同 Facet 的条件为 AND，同一 Facet 列表为 OR；规则之间为 OR。未列出的 Facet 不限。空规则、空列表、未知 Facet、未知 Node 或控制节点 ID 都是配置错误。exclude 只改变静态 DAG；之后可按需求筛选生成执行图，节点运行时 Applicability 不再增删节点。
 
 ## 组合 DAG 的生成规则
 
@@ -472,14 +479,43 @@ Combination ID 使用 Workflow ID 和按声明顺序排列的 `members` 稳定�
 development/feature:login/layer:domain
 ~~~
 
-调度和代码输入汇聚统一使用最终约简 DAG 中的直接前驱。只有所有业务直接前驱的 CombinationRun 都为 satisfied，节点才可运行。互不依赖的就绪分支可并行；汇聚节点等待全部直接前驱。
+调度和代码输入汇聚统一使用筛选后实际执行 DAG 中的直接前驱。只有所有业务直接前驱的 CombinationRun 都为 satisfied，节点才可运行。互不依赖的就绪分支可并行；汇聚节点等待全部直接前驱。
+
+## 运行前适用性筛选
+
+筛选单位是静态组合图中的业务 Combination，不是原始 Facet Node。它判断当前需求是否需要该组合承担职责；节点 Pre-Assess 则在前驱完成后判断真实输入与适用性，两者均保留。
+
+| mode | 输入与执行方式 | 主要取舍 |
+| --- | --- | --- |
+| global | 一个独立 Agent 会话读取完整组合图、需求与有效上下文 | 能统一比较职责，图大时上下文压力较高 |
+| parallel | 每个组合一个独立会话，使用公共前缀、当前组合上下文和必要依赖摘要 | 分离关注点、可并发；不默认复制其他节点的全部资料 |
+
+```text
+节点替换积 → 静态 exclude → source-dag.yaml
+    ↓ global / parallel 筛选
+每组合 keep / exclude / defer
+    ↓ automatic / human 采用
+统一排除集合 → 旁路补边 → 传递约简 → 固定 dag.yaml
+    ↓
+前驱完成 → 节点 Pre-Assess → 执行、检查与 Gate
+```
+
+- keep 保留，exclude 提议排除，defer 表示当前材料不足以确定并保留。每项须有非空理由和依据；exclude 必须引用具体需求或职责材料。前驱尚未产出代码、基线缺少文件或无需改代码，不单独构成排除理由；验证职责同样参与判断。
+- 筛选器不改节点、边、Scope 或配置，只报告业务节点判断。Runtime 以 source-dag 为裁剪前完整图，一次性计算最终排除集合；沿用 [组合 DAG 的生成规则](#组合-dag-的生成规则) 的旁路补边、传递约简和稳定序列化，忽略分项返回先后顺序。
+- 被排除节点不创建 CombinationRun / Attempt，不运行其检查、Post-Assess 或成果 Gate。保留节点的职责、Scope、检查及 Gate 不变，代码输入来自执行图中的有效直接前驱；新根节点使用 source_commit。
+- automatic 在报告与图校验通过后直接采用；human 等待一次集中确认，人类可恢复 exclude 节点或保留完整图，不能额外排除 keep / defer 节点或直接编辑边。筛选报告本身不被人工改写。
+- 全部业务节点被提议排除时，无论 confirmation 如何配置都暂停。人类至少恢复一个节点后确认，或显式重试筛选、停止 Run；不生成空执行图，不把需求直接判定为满足。静态 exclude 排除全部节点仍是配置错误。
+- 工作区草稿可暂缺 selection.mode / confirmation，显示不可运行；发布和启动要求完整有效配置。静态预览不发起 Agent 调用，需求相关筛选只在 Run 中执行。
+
+采用前不调度业务节点；采用后执行图固定，筛选错误需在新 Run 中重新评估。节点 Pre-Assess 返回 not_applicable 时仍沿用已有检查与审核规则，不再次裁剪。筛选报告、采用记录及任务恢复见 [运行前筛选协议](04-execution.md#运行前筛选协议)。
 
 ## 运行快照
 
-完成排除、桥接和传递约简的最终图先在 `.facetloom/.runtime/runs/<run-id>/dag.yaml` 持久化；最终采纳时作为精简档案写入 main：
+静态组合图与实际执行图使用相同格式。创建 Run 时先保存 source-dag.yaml；筛选采用后才保存 dag.yaml，执行期间不得改写。两者先在本地运行目录持久化，最终采纳时作为精简档案写入 main：
 
 ~~~text
-.facetloom/runs/<run-id>/dag.yaml
+.facetloom/runs/<run-id>/source-dag.yaml  # 节点替换积、静态 exclude 与约简后的图
+.facetloom/runs/<run-id>/dag.yaml         # 采用筛选结果后的执行图
 ~~~
 
 下面用只有 `login`、`domain` 和 `application` 的小图说明文件格式。
@@ -508,4 +544,4 @@ edges:
   - {from: development/feature:login/layer:application, to: end}
 ~~~
 
-每个业务节点的 `members` 必须列出 Workflow 中每个 Facet 的 Node ID，顺序遵循 `facets` 声明顺序，并与 Combination ID 一致；控制节点不含 `members`。传递约简后，按 Combination ID 排列业务节点、按 `(from, to)` 排列边，再以固定字段顺序、UTF-8 和 LF 写出 YAML。`dag_digest` 对实际写入的完整文件字节求 SHA-256。相同定义必须生成相同 DAG；后续定义变化、重启和重试都不能改写该快照。
+每个业务节点的 `members` 必须列出 Workflow 中每个 Facet 的 Node ID，顺序遵循 `facets` 声明顺序，并与 Combination ID 一致；控制节点不含 `members`。传递约简后，按 Combination ID 排列业务节点、按 `(from, to)` 排列边，再以固定字段顺序、UTF-8 和 LF 写出 YAML。`dag_digest` 对实际写入的完整文件字节求 SHA-256。相同定义生成相同 source-dag；相同 source-dag 与最终排除集合生成相同执行图。AI 筛选结论本身不保证跨次相同。采用后的 dag.yaml 不因重启、重试或节点修复改变。

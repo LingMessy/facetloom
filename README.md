@@ -10,6 +10,8 @@ FacetLoom 围绕一个冻结的 Requirement，用多个 Facet 从不同角度拆
 
 ## 核心模型
 
+运行前筛选支持一个 Agent 整体判断或各组合独立并发判断；结果可自动采用或由人类集中确认。排除节点统一旁路并约简，实际执行图采用后固定；无法确定的组合保留，节点执行前仍有 Pre-Assess。
+
 需求默认由 AI 辅助起草，可随时切换纯手动模式；当前 clone 保存默认选择，每个需求可覆盖。起草独立选择外部 Agent runner，AI 修改本地草稿，人类审阅后冻结并启动工作流。
 
 Workflow 按 Facet 声明顺序应用节点替换积，每个 Facet 用 DAG 组织上下文 Node。运算从外到内且不满足交换律，因此 Facet 顺序会定义 Combination DAG 的拓扑。`exclude` 在完整 DAG 生成后按 Combination 的 Facet→Node 来源映射匹配；删除命中节点后补齐旁路边，再对整个结果做传递约简，保留相同依赖顺序并去除冗余边。Combination 是执行单元，互不依赖的分支可并行，汇聚节点等待全部前驱。
@@ -27,7 +29,9 @@ Layer:   start → Domain ─┬→ Application ─┐
 ```text
 main：Requirement + Workflow + Facets + 正式代码 + 精简运行档案
     ↓ source_commit
-本地 Runtime → Combination DAG → 并行 Worker / Worktree
+本地 Runtime → 静态组合图 → 整体筛选 / 并发预筛选 → 采用执行 DAG
+    ↓
+并行 Worker / Worktree
     ↓
 必要检查与预算内修复 → Checkpoint → 各 Node 的 Gate 全部批准 → 汇聚
     ↓

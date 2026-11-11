@@ -19,6 +19,9 @@ Workflow 按 `feature ▷ layer` 生成组合图，静态排除 notification × 
 exclude:
   - feature: [notification]
     layer: [application]
+selection:
+  mode: parallel
+  confirmation: human
 execution:
   runner: developer
   checks:
@@ -46,9 +49,31 @@ flowchart LR
     ND --> NP[notification × presentation]
 ```
 
-Feature 分支可并行；login 的 application 与 data 在 domain 满足后并行，presentation 汇聚二者。排除 `notification × application` 后，先补上 `notification × domain → notification × presentation`；由于保留路径 `domain → data → presentation` 已表达该顺序，传递约简再删除这条冗余边。上图展示最终约简结果，notification 的 presentation 只需直接汇聚 data 的输出。控制边界和其余规则见 [Workflow](01-workflow.md)。
+Feature 分支可并行；login 的 application 与 data 在 domain 满足后并行，presentation 汇聚二者。排除 `notification × application` 后，先补上 `notification × domain → notification × presentation`；由于保留路径 `domain → data → presentation` 已表达该顺序，传递约简再删除这条冗余边。上图展示 source-dag 的静态约简结果，notification 的 presentation 只需直接汇聚 data 的输出。控制边界和其余规则见 [Workflow](01-workflow.md)。
 
 Verification Facet 可增加验证职责，验证等待哪些前驱取决于 Facet 顺序和 DAG 拓扑。放在 Feature 内层可分别验证各 Feature；外层配置“实施 → 验证”则可形成阶段屏障，见 [顺序对比图](01-workflow.md#facet-顺序与验证位置)。最后的整体检查仍由 integration.checks 执行。
+
+## 筛选与裁剪示例
+
+静态 Workflow 预览只生成 source-dag；运行时筛选可以按需求进一步裁剪。若 notification 的职责明确是需求未涉及的外发通知，筛选器可逐项引用需求与职责依据，建议排除其 domain / data / presentation 组合。人类确认后执行图只保留 login 分支；notification 不创建 Attempt。若职责资料不足以确定则 defer，保留给节点 Pre-Assess 判断。
+
+另一种局部裁剪示例：原链 `A → B → C` 中，仅 B 的职责被明确判定无关，采用后变为 `A → C`，C 接收 A 的有效输出。若还有 `A → D → C` 的保留路径，统一补边后再约简，避免冗余 `A → C`。筛选不能改写 C 的 Scope、检查或 Gate。
+
+| 场景 | 预期结果 |
+| --- | --- |
+| global / parallel | 前者一会话覆盖所有组合，后者一组合一会话；均得到完整逐组合报告 |
+| 相同最终排除集合、不同分项返回顺序 | 执行图、直接前驱和摘要一致；不要求模型跨次返回相同结论 |
+| automatic / human | 分别自动采用完整有效结果 / 等待一次集中确认；采用前无业务 Attempt |
+| 验证目标尚未实现、无代码修改、当前证据不充分 | 不因此自动 exclude；不确定返回 defer，节点 Pre-Assess 仍执行 |
+| parallel 一个分项缺失、重复 ID、越权引用或调用失败 | 整轮 error，不采用部分结果；错误 Gate 可完整重筛 |
+| 全部 exclude | 两种确认配置均暂停，人类恢复至少一个节点、重筛或停止；不进入空图集成 |
+| 人工恢复 exclude 节点 / 尝试排除 keep 节点 | 前者重新预览并绑定新摘要；后者拒绝 |
+| 重筛后提交旧报告确认、重复确认、迟到分项 | 拒绝过期输入；已采用结果不被覆盖、不重复启动 |
+| 取消、基线变化、事务中断或原生调用结果未知 | 先撤销/对账，恢复不重复调用或采用，旧结果不启动节点 |
+| 超出 selection_concurrency | 排队；队列顺序稳定，不改变筛选与图语义 |
+| 采用后的节点 Pre-Assess 为 not_applicable | 跳过代码执行但仍检查与审核，不再次裁剪图 |
+| 筛选误排被后续发现 | 新建 Run；repair_combination 不能重新插入被排除节点 |
+| 导出或精炼清理筛选材料 | 保留 source-dag、采用报告及引用闭包，不能漏掉无 Attempt 的排除依据 |
 
 ## 同一需求如何从不同角度对齐
 
@@ -180,7 +205,7 @@ workflow/unit 失败：登录接口尚未返回 remaining_seconds。
 以 `login × domain` 为例：Facet 定义中的 login 和 domain Node 组合成一个静态 Combination Node；本次 WorkflowRun 为它保存一条 CombinationRun，首次执行创建 Attempt。错误恢复创建新的 Attempt，同次预算内修复继续使用原 Attempt；审核依据始终绑定对应尝试。对象边界见 [运行对象生命周期](02-requirement.md#运行对象生命周期)。
 
 1. main 已有 Workflow、Facet、runner、审核配置和项目代码；本地准备固定 digest 的镜像与凭据。创建 UUID 草稿时复制本 clone 默认模式（初始为 ai_assisted）；独立选择起草 runner 并提交请求，AI 整理目标和验收条件。用户可随时切换 manual；无可用 Agent 时仍可手动完成，无需 remote 或先选 Workflow。
-2. 人类审阅正文、AI Diff 与待澄清事项，按当前草稿摘要确认冻结为 requirement_ref，同时撤销在途起草请求。再选择 Workflow 并启动，Runtime 以此时的 main 固定 source_commit，生成 DAG，本地事务创建 Run；起草基线不代替执行基线。此时 main 不变。
+2. 人类审阅正文、AI Diff 与待澄清事项，按当前草稿摘要确认冻结为 requirement_ref，同时撤销在途起草请求。再选择 Workflow 并启动，Runtime 以此时的 main 固定 source_commit，生成 source-dag，本地事务创建 Run；起草基线不代替执行基线。此时 main 不变；先按 selection 并发预筛选，汇总后集中确认并固定执行图。本主流程保留全部组合（不确定项 defer），以展示完整执行与不适用处理；另见 [筛选与裁剪示例](#筛选与裁剪示例)。
 3. Runtime 先创建 preparing Attempt，再固定代码输入和 Context Snapshot。Adapter 探测外部 Agent、保存初始请求，以只读容器和独立会话运行 Pre-Assess；Invocation 记录版本、argv 和 session_id。固定引用暂不可读可进入错误 Gate 等待，补充需求则创建新 UUID，不修改冻结文件。
 4. 适用时调用外部 Agent，校验并留存 ExecutionResult；不适用则复用输入。Runtime 执行累积的必要检查，适用任务可在预算内续接修复并全量重检；固定最终 Tree 后保存 Checkpoint、CheckReport、只读 Post-Assess、bundle 与证据，计算 review_input_digest。本地 waiting_gate 事务落地后开始审核。
 5. 各成果 Gate 可并行：AI 使用独立会话，脚本直接运行程序。报告是审核输出，不修改执行证据。全部批准与关联状态本地落地后，才解锁后继。
@@ -193,7 +218,7 @@ workflow/unit 失败：登录接口尚未返回 remaining_seconds。
 ```text
 main: C0 ─────────────────────────────────────────── C1
        │                                             │
-       └─ 本地需求 → 执行 → Gate → 集成中 → 集成错误 Gate / 修复 → completed → 人类确认 ──┘
+       └─ 本地需求 → 筛选采用 → 执行 → Gate → 集成中 → 集成错误 Gate / 修复 → completed → 人类确认 ──┘
                                                      ├─ requirements/<uuid>.md
                                                      ├─ 项目代码
                                                      └─ runs/<run-id>/（含回执）
@@ -267,7 +292,7 @@ A 完成精炼后，Artifact 仍留在 A 的本地库。需要释放空间时单
 main
 ├── 项目代码、Requirement、Workflow、Facet
 └── .facetloom/runs/<run-id>/
-    ├── run.yaml / summary.md / dag.yaml
+    ├── run.yaml / summary.md / source-dag.yaml / dag.yaml
     ├── contexts/ / combinations/ / attempts/ / errors/
     └── checkpoints/ / decisions/ / reports/ / deliveries/
 
@@ -327,7 +352,7 @@ Git 外的独立交换文件
 | 场景 | 预期结果 |
 | --- | --- |
 | 无效 Facet、排除引用或图有环 | 创建 Run 前拒绝 |
-| 相同定义、不同 clone | 稳定 Combination ID 和 DAG，不同 Run ID |
+| 相同定义、不同 clone | 稳定 Combination ID 与 source-dag，不同 Run ID；筛选结论可不同，相同最终排除集合生成相同执行图 |
 | 无依赖分支、汇聚 | 并行执行，汇聚等待全部前驱 |
 | 排除中间 Combination | 统一补边后传递约简，保持剩余节点间原有可达关系 |
 | 无 exclude 但存在冗余边 | 同样进行传递约简，调度与汇聚使用最终直接前驱 |

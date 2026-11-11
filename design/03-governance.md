@@ -215,7 +215,7 @@ flowchart TD
     IG --> S
 ```
 
-错误 Gate 复用 human、ai_assisted、ai、script 模式及 GateReport / GateDecision，不增加 GateRun。每个节点同一时刻只有一个 active_error_ref；集成错误在 run.yaml 中单独保存一个 active_error_ref，均使用 `gate_id: workflow/error`。集成处置不创建 Attempt，Run 保持 blocked 直到恢复决定落地。不同节点的错误可分别评估，恢复动作由 Runtime 串行校验；重叠修复范围先撤销过期错误任务，避免重复恢复。
+错误 Gate 复用 human、ai_assisted、ai、script 模式及 GateReport / GateDecision，不增加 GateRun。每个节点同一时刻只有一个 active_error_ref；筛选与集成错误在各自阶段共用 run.yaml 的一个 active_error_ref，均使用 `gate_id: workflow/error`。筛选与集成处置不创建 Attempt，Run 保持 blocked 直到恢复决定落地。不同节点的错误可分别评估，恢复动作由 Runtime 串行校验；重叠修复范围先撤销过期错误任务，避免重复恢复。
 
 | 情况 | 路径 |
 | --- | --- |
@@ -229,6 +229,8 @@ flowchart TD
 | 本地事务或 Artifact 持久化暂不可用 | 保留恢复信息，完成持久化前不开始正式审核或推进状态 |
 | main 暂不可写 | 仅阻塞最终采纳，不阻塞已满足本地条件的执行与 Gate |
 | Git 远端同步暂不可用 | 不改变本地已生效决定，不阻塞满足本地条件的审核、恢复或交付 |
+| 筛选调用失败、超时、无效输出或证据错误 | error SelectionReport → selection ErrorRecord → 错误 Gate；不将失败伪装成 defer |
+| 筛选全部 exclude / 等待人工采用 | completed SelectionReport 与 Run.blocked，直接等待人工；不创建错误或自动恢复循环 |
 | 最终汇聚冲突、集成检查失败或执行错误 | IntegrationReport blocked / failed → 集成 ErrorRecord → 错误 Gate，仍在原 Run 内恢复 |
 | 正式输入变化、需求已采纳 | 阻止继续；不提供同 Run 恢复动作，按基线或采纳规则处理 |
 | completed 后交付写入失败或结果未知 | 保留成功集成报告，按原交付意图对账；不重开 Run |
@@ -240,12 +242,12 @@ flowchart TD
 | 字段 | 定义 |
 | --- | --- |
 | schema_version、error_id | 格式为 1，UUIDv4 |
-| scope | combination / integration，区分节点尝试与 Run 集成错误 |
-| run_id、combination_id、attempt_id | combination 时指向失败或拒绝的尝试；integration 时仅 run_id 有值，其余为 null |
-| stage | combination 使用 preparation / pre_assess / execution / checks / post_assess / result_review；integration 固定为 integration |
+| scope | combination / selection / integration，区分节点尝试与 Run 级筛选、集成错误 |
+| run_id、combination_id、attempt_id | combination 时指向失败或拒绝的尝试；selection / integration 时仅 run_id 有值，其余为 null |
+| stage | combination 使用 preparation / pre_assess / execution / checks / post_assess / result_review；selection / integration 分别固定为同名阶段 |
 | code、message | 机器可读原因码与非空说明；常用原因包括 `pre_assess_blocked`、`pre_assess_failed`、`post_assess_failed`、`evidence_import_failed`、`evidence_reference_invalid` |
-| context_snapshot_ref、input_commit | 节点已形成的固定输入；未形成可为 null。integration 时均为 null，候选及终端输入从报告读取 |
-| evidence_refs | 已保存的实际材料；integration 必须包含本轮 IntegrationReport 类型化引用，可经报告读取候选、失败检查或冲突；不要求有代码输出或 Agent 请求 |
+| context_snapshot_ref、input_commit | 节点已形成的固定输入；未形成可为 null。selection / integration 时均为 null，固定输入从对应报告读取 |
+| evidence_refs | 已保存的实际材料；selection 必须包含本轮 error SelectionReport；integration 必须包含本轮 IntegrationReport 类型化引用，可经报告读取候选、失败检查或冲突；不要求有代码输出或 Agent 请求 |
 | wait_condition | 可空；仅对有效的 `pre_assess` / `pre_assess_blocked` ErrorRecord，且其 PreAssessReport 的 `missing_inputs[].source_refs` 列出该引用时填写 `{kind: fixed_reference_unavailable, source_ref, observation, checked_at}`。`source_ref` 是 Snapshot 中完整类型化引用，摘要必须匹配；`checked_at` 为 UTC ISO 8601。Agent 自述不能单独建立此字段 |
 | related_predecessors | 相关 combination_id、attempt_id、output_commit；未知时空列表 |
 | trigger_decision_ref | 成果拒绝时必填；其他情况可空 |
@@ -270,7 +272,7 @@ trigger_decision_ref: null
 created_at: "2026-11-09T12:00:00Z"
 ```
 
-集成 ErrorRecord 的 wait_condition、trigger_decision_ref 为 null，related_predecessors 为空；终端来源以 IntegrationReport.terminal_outputs 为准。集成错误常用 code 为 integration_failed（完整检查失败）或 integration_blocked（冲突、执行错误或证据不可恢复）。
+筛选与集成 ErrorRecord 的 wait_condition、trigger_decision_ref 为 null，related_predecessors 为空；筛选错误 code=selection_failed，固定输入来自 SelectionReport。集成终端来源以 IntegrationReport.terminal_outputs 为准。集成错误常用 code 为 integration_failed（完整检查失败）或 integration_blocked（冲突、执行错误或证据不可恢复）。
 
 集成错误文件示例：
 
@@ -305,20 +307,20 @@ created_at: "2026-11-11T12:00:00Z"
 
 | 字段 | 规则 |
 | --- | --- |
-| scope、run_id、combination_id、attempt_id | 与 ErrorRecord 一致；integration 时两个节点身份字段为 null，active_error_ref 从 run.yaml 读取 |
+| scope、run_id、combination_id、attempt_id | 与 ErrorRecord 一致；selection / integration 时两个节点身份字段为 null，active_error_ref 从 run.yaml 读取 |
 | gate_id | 固定 workflow/error |
 | error_ref | 必填，ErrorRecord 的类型化引用 |
 | gate_policy_digest | 必须匹配 run.yaml 的有效错误策略 |
 | review_input_digest | 错误审核摘要，算法见下文 |
 | previous_decision_id | 同一错误的上一决定；首次 null，wait 后可以新决定继续处置 |
 | result | 不使用此字段，避免把动作解释成成果批准 |
-| action | completed 报告及 Decision 必填；combination 支持 retry_current / repair_upstream / wait / stop_run；integration 只支持 retry_integration / repair_combination / stop_run |
+| action | completed 报告及 Decision 必填；combination 支持 retry_current / repair_upstream / wait / stop_run；integration 只支持 retry_integration / repair_combination / stop_run；selection 只支持 retry_selection / stop_run |
 | repair_target_combination_id、repair_instruction | repair_upstream / repair_combination 必填，单一业务节点 ID 与非空指令；其他动作不填 |
 | context_snapshot_ref、evaluated_tree | 不作为错误协议字段；可用输入从 ErrorRecord 读取 |
-| expected_combination_digest | combination Decision 必填，保护当前错误与节点状态；integration 不填 |
-| expected_run_digest | integration Decision 必填，run.yaml 完整文件 SHA-256；combination 不填，Run 预算仍由本地事务校验 |
+| expected_combination_digest | combination Decision 必填，保护当前错误与节点状态；selection / integration 不填 |
+| expected_run_digest | selection / integration Decision 必填，run.yaml 完整文件 SHA-256；combination 不填，Run 预算仍由本地事务校验 |
 
-review_input_digest 为 `{review_kind: "error", error_ref, gate_policy_digest}` 按 RFC 8785 JCS 规范化后的 SHA-256。审核请求带 scope、完整 ErrorRecord、错误策略、当前所属对象状态、剩余额度及此摘要对象；集成请求另提供本轮 IntegrationReport、终端成果与修复目标预览所需的固定 DAG。状态和额度是操作可行性提示，不属于不可变错误事实，落地前必须重新校验。
+review_input_digest 为 `{review_kind: "error", error_ref, gate_policy_digest}` 按 RFC 8785 JCS 规范化后的 SHA-256。审核请求带 scope、完整 ErrorRecord、错误策略、当前所属对象状态、剩余额度及此摘要对象；集成请求另提供本轮 IntegrationReport、终端成果与修复目标预览所需的固定 DAG；筛选请求提供本轮 SelectionReport、静态 source-dag 与筛选策略，不伪造执行图。状态和额度是操作可行性提示，不属于不可变错误事实，落地前必须重新校验。
 
 脚本仍由 stdin 接收 JSON，stdout 返回一个对象；AI Adapter 使用相同返回结构。AI 原始输出可另含 `evidence_files`，Script Gate 不支持该字段：
 
@@ -340,8 +342,9 @@ Runtime 在生成 Decision 前按 ErrorRecord 和当前外部引用状态校验�
 | retry_current | 原节点输入仍有效，旧 Worker 已停止或隔离；本地事务落地后新建 Attempt。对 `pre_assess_blocked`，仅在 `wait_condition` 非空且 Runtime 确认同一引用已恢复、内容摘要匹配时可重试，并须复用原 Context Snapshot；若缺少需求信息或需变更输入，不能在该 Run 重试，必须创建新 Run；需求内容变化时同时创建新 Requirement |
 | repair_upstream | 目标为同 Run 祖先，指令非空；本地事务落地后目标及全部后继失效、按 DAG 重执行 |
 | wait | 仅当 ErrorRecord.wait_condition 非空且该引用仍暂时不可读时有效；节点 blocked 并保留 active_error_ref，不自动轮询或重发。引用恢复后需显式按固定 Gate 模式重新评估；retry_current 创建的新 Attempt 复用原 Snapshot |
+| retry_selection | 仅 selection；尚未采用执行图，固定需求、基线、源图及策略有效，旧调用已停止或隔离；新轮次完整重筛，Run 转 selecting，不创建 Attempt |
 | retry_integration | 仅 integration；正式输入与报告中有效终端成果未变，旧集成任务已停止或隔离。新操作重新汇聚并执行全部集成检查，Run 转 integrating，不创建 Attempt |
-| repair_combination | 仅 integration；目标为同 Run 的一个业务节点，指令不扩展 Scope 或固定定义。目标及全部后继失效，Run 转 running，按现有 DAG 输入规则创建新 Attempt；无关分支成果保留 |
+| repair_combination | 仅 integration；目标为同 Run 已采用执行图中的一个业务节点，不能重新插入筛选排除节点；指令不扩展 Scope 或固定定义。目标及全部后继失效，Run 转 running，按现有 DAG 输入规则创建新 Attempt；无关分支成果保留 |
 | stop_run | 取消尚未结束的 Run，停止其活动任务；已接受历史不改写 |
 
 集成恢复决定落地时清空 run.yaml 的当前集成报告及错误引用，取消旧评估任务，报告、错误和决定文件保留为本地历史，清理仍遵循既有引用保护规则。修复目标和受影响后继通过 Attempt.recovery_decision_ref 关联本次决定，Snapshot.recovery_context 引用必要材料；旧候选仅作参考，不自动成为输入，规则见 [恢复上下文与旧成果](04-execution.md#恢复上下文与旧成果)。各节点重新执行自己的检查和全部成果 Gate，再触发新一轮集成。错误 Gate 不直接修改候选；无法在现有 Scope 内修复时停止并调整定义后新建 Run。
@@ -375,11 +378,11 @@ decided_by: {kind: human, id: "user:ling"}
 created_at: "2026-11-09T12:00:00Z"
 ~~~
 
-AI/脚本的 retry_current、repair_upstream、retry_integration、repair_combination 每次消耗一个 Run 级额度；默认 3 次。Runtime 在同一事务中校验并增加 auto_recoveries_used、记录动作 ID、关联状态和恢复动作意图；同一决定不重复扣减。耗尽后保留报告交给人类，不执行超额动作。人类恢复不消耗自动额度，不重置计数。
+AI/脚本的 retry_current、repair_upstream、retry_selection、retry_integration、repair_combination 每次消耗一个 Run 级额度；默认 3 次。Runtime 在同一事务中校验并增加 auto_recoveries_used、记录动作 ID、关联状态和恢复动作意图；同一决定不重复扣减。耗尽后保留报告交给人类，不执行超额动作。人类恢复不消耗自动额度，不重置计数。
 
-决定落地前重新校验 Run 非终态、当前错误及前一决定未变、有效策略和材料摘要匹配；恢复动作另要求需求尚未采纳、输入有效、修复范围和额度可用，stop_run 不因基线失效而被禁止。记录并发写入按 scope 使用 expected_combination_digest 或 expected_run_digest；Run 计数也在同一事务比较更新。集成决定还须匹配当前 integration_report_ref、终端 accepted_attempt_id / 输出引用及前一错误决定，其他分项更新后重新读取并校验，不能凭旧报告修复。其他错误决定若已让该节点 stale、替换 Attempt 或取消 Run，当前动作作废。旧错误及决定保留，不能自动重放成新动作。
+决定落地前重新校验 Run 非终态、当前错误及前一决定未变、有效策略和材料摘要匹配；恢复动作另要求需求尚未采纳、输入有效、修复范围和额度可用，stop_run 不因基线失效而被禁止。记录并发写入按 scope 使用 expected_combination_digest 或 expected_run_digest；Run 计数也在同一事务比较更新。筛选决定还须匹配当前 selection_report_ref 和活动轮次，且 selection_adoption 为 null；集成决定还须匹配当前 integration_report_ref、终端 accepted_attempt_id / 输出引用及前一错误决定，其他分项更新后重新读取并校验，不能凭旧报告修复。其他错误决定若已让该节点 stale、替换 Attempt 或取消 Run，当前动作作废。旧错误及决定保留，不能自动重放成新动作。
 
-Decision、额度和关联状态作为同一个本地事务保存，完整落地后才安排恢复 Worker 或集成任务。错误处置永不设置 accepted_attempt_id；新 Attempt 的所有成果 Gate 重新审核。定义与权限边界不能通过动作扩展：修改需求创建新 UUID；修改 Scope 或策略由人类提交定义，再创建新 Run。
+Decision、额度和关联状态作为同一个本地事务保存，完整落地后才安排筛选调用、恢复 Worker 或集成任务。错误处置永不设置 accepted_attempt_id；新 Attempt 的所有成果 Gate 重新审核。定义与权限边界不能通过动作扩展：修改需求创建新 UUID；修改 Scope 或策略由人类提交定义，再创建新 Run。
 
 ## Refinement：运行精炼
 
