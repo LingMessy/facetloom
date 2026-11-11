@@ -2,9 +2,11 @@
 
 **Multi-Facet AI Engineering Studio**
 
-FacetLoom 从需求出发，为 Agent 提供明确的上下文与修改范围，通过 DAG 并行执行、Git Checkpoint 和可配置 Gate 形成可审核的代码成果，再用 Refinement 将运行经验转化为改进。
+FacetLoom 围绕一个冻结的 Requirement，用多个 Facet 从不同角度拆解和对齐需求，再通过 Combination DAG、并行执行、Git Checkpoint 和可配置 Gate 形成可审核的交付。
 
 > 需求有去向，任务有边界，产物有证据。
+
+当前核心是单次 Requirement 的对齐、执行、审核与交付。跨多个 Requirement、Commit 和 Release 的架构治理、漂移检测、质量趋势等属于长期发展方向，不是当前实现范围。运行所需的上下文引用、检查、Verification、Artifact 与 Gate 证据属于单次交付闭环。
 
 ## 核心模型
 
@@ -87,7 +89,7 @@ Artifact 默认保留，释放空间须另行人工 purge，先检查完整依�
 
 - [Design](design/00-overview.md)：按 00–07 阅读的实现规范。
 - [Plan](plan.md)：实现阶段、依赖与验收条件。
-- [Idea](idea.md)：产品目标、架构动机和后续构想，具体协议以 Design 为准。
+- [Idea](idea.md)：产品目标、架构动机和长期发展方向，具体协议以 Design 为准。
 
 ## 命名约定
 

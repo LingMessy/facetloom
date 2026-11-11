@@ -1,6 +1,6 @@
-# Governance：Gate 与 Refinement
+# 运行治理：Gate 与 Refinement
 
-成果 Gate 按 Node 要求审核 Combination 输出；错误 Gate 决定执行失败或成果拒绝后的处理动作。Refinement 将运行经验转化为改进。正式定义发布、最终代码交付和精炼采纳由人类确认。
+本文件定义单次 WorkflowRun 内的授权、审核、恢复和证据处理，不定义跨 Requirement、Commit 或 Release 的长期治理系统。成果 Gate 按 Node 要求审核 Combination 输出；错误 Gate 决定执行失败或成果拒绝后的处理动作。Refinement 将运行经验转化为改进。正式定义发布、最终代码交付和精炼采纳由人类确认。
 
 运行对象先保存在 `.facetloom/.runtime/runs/<run-id>/`，本地事务落地即生效；仅最终采纳时选取必要记录及依赖闭包加入 main。下文路径以采纳档案表示，执行期间使用相同相对布局。
 

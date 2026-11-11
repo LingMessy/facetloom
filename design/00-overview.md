@@ -2,12 +2,14 @@
 
 这组文档描述当前对象、文件与运行规则，按编号阅读。
 
+当前设计聚焦一个冻结 Requirement 的多 Facet 对齐与交付：Facet 提供不同上下文维度，组合 DAG 组织执行依赖，Runtime 通过检查、Gate 和证据完成单次运行闭环。跨 Requirement、Commit 或 Release 的持续治理是长期发展方向，不属于当前对象模型和实现验收范围。这里的运行治理仅指单次运行中的授权、审核、恢复和交付。
+
 | 顺序 | 文档 | 解决的问题 |
 | --- | --- | --- |
 | 00 | 本文 | 系统边界、对象关系和存储位置 |
 | 01 | [Workflow](01-workflow.md) | Facet、Node、Combination 与组合 DAG |
 | 02 | [Requirement](02-requirement.md) | 独立需求、运行对象和一次采纳 |
-| 03 | [Governance](03-governance.md) | 成果审核、错误处置、四种模式与 Refinement |
+| 03 | [运行治理](03-governance.md) | 成果审核、错误处置、四种模式与 Refinement |
 | 04 | [Execution](04-execution.md) | 上下文、Checkpoint、Artifact 存储与交换、交付 |
 | 05 | [Services](05-services.md) | Runtime、Git、容器与 Agent 的职责 |
 | 06 | [WebUI](06-user-interface.md) | 查看运行、审核成果、精炼记录 |
