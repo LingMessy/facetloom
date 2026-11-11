@@ -2,7 +2,7 @@
 
 这组文档描述当前对象、文件与运行规则，按编号阅读。
 
-当前设计聚焦一个冻结 Requirement 的多 Facet 对齐与交付：Facet 提供不同上下文维度，组合 DAG 组织执行依赖，Runtime 通过检查、Gate 和证据完成单次运行闭环。跨 Requirement、Commit 或 Release 的持续治理是长期发展方向，不属于当前对象模型和实现验收范围。这里的运行治理仅指单次运行中的授权、审核、恢复和交付。
+当前设计聚焦一个冻结 Requirement 的多 Facet 对齐与交付：Facet 提供不同上下文维度，组合 DAG 组织执行依赖，Runtime 通过检查、Gate 和证据完成单次运行闭环。这里的运行治理包括运行内的授权、审核、恢复和交付，以及运行后的 Refinement。跨 Requirement、Commit 或 Release 的持续治理系统属于后续发展方向。
 
 | 顺序 | 文档 | 解决的问题 |
 | --- | --- | --- |
@@ -63,6 +63,8 @@ FacetLoom 编排外部 Agent，不实现模型推理或工具循环。Podman 镜
 Attempt 先以 preparing 持久化，再形成输入和 Context Snapshot；准备失败也有可审核的错误记录。Context Snapshot 保存有效上下文清单，交给外部程序的实际输入由 Attempt / GateReport 引用持久 Artifact。执行与必要检查完成后冻结审核输入；后续 Gate 报告是审核输出，不回写执行证据。审核定义统一由 source_commit 固定，本地只配置凭据、连接和资源上限。
 
 每个普通 Node 声明或继承一项 Gate：human、ai_assisted、ai、script。Combination 的各项独立审核同一固定输出，全部批准才接受成果。无法执行或成果被拒绝时，由 Workflow 的独立错误 Gate 决定重试、修复上游、等待或停止；默认人工，自动恢复每个 Run 最多 3 次。处置决策不代表成果被接受。最终代码交付仍需人类确认。
+
+完整 Requirement 贯穿各组合；局部 Gate 判断当前组合职责内的成果是否合格，最终集成检查与人类确认判断整体交付。Facet 顺序会改变验证的依赖范围，见 [Facet 顺序与验证位置](01-workflow.md#facet-顺序与验证位置)。
 
 ## 单 main 与隔离执行
 

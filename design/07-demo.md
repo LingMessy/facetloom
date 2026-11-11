@@ -48,7 +48,21 @@ flowchart LR
 
 Feature 分支可并行；login 的 application 与 data 在 domain 满足后并行，presentation 汇聚二者。排除 `notification × application` 后，先补上 `notification × domain → notification × presentation`；由于保留路径 `domain → data → presentation` 已表达该顺序，传递约简再删除这条冗余边。上图展示最终约简结果，notification 的 presentation 只需直接汇聚 data 的输出。控制边界和其余规则见 [Workflow](01-workflow.md)。
 
-Verification Facet 可增加节点级验证，其边只约束其余 Facet 选择相同的组合，不自动构成全局验证屏障。最后的整体检查由 integration.checks 执行。
+Verification Facet 可增加验证职责，验证等待哪些前驱取决于 Facet 顺序和 DAG 拓扑。放在 Feature 内层可分别验证各 Feature；外层配置“实施 → 验证”则可形成阶段屏障，见 [顺序对比图](01-workflow.md#facet-顺序与验证位置)。最后的整体检查仍由 integration.checks 执行。
+
+## 同一需求如何从不同角度对齐
+
+每个组合读取完整的冻结需求，再按所选 Node 的职责处理当前部分。下表说明登录限制需求的职责与证据，不新增运行字段或自动覆盖率判定；具体测试需在必要检查或 integration.checks 中配置。
+
+| 位置 | 当前职责 | 检查依据与证据 |
+| --- | --- | --- |
+| login × domain | 定义连续失败阈值、限制期与到期恢复规则 | 冻结需求及认证资料；领域边界测试、代码 Diff、CheckReport |
+| login × application | 将领域结果传递给登录接口，返回限制状态和剩余时间 | 领域输出与接口约定；接口测试、CheckReport |
+| login × data | 保存并读取规则所需的失败计数和限制状态 | 领域输出与存储约定；仓储测试、CheckReport |
+| login × presentation | 汇聚应用与数据成果，展示剩余时间及恢复状态 | 完整需求与前驱输出；界面测试、可复核界面证据、CheckReport |
+| 最终集成与交付 | 验证从失败请求到限制生效、界面提示和恢复的完整行为 | 最终候选上的回归检查、IntegrationReport、人类确认 |
+
+每行是对现有需求与引用资料的职责解释；未明确的业务行为应在冻结前补齐，不能靠表格或 Agent 自行增加要求。领域成果通过审核时，界面尚未完成属于正常依赖顺序；若领域结果无法支持所需的剩余时间，则是当前成果应处理的问题。notification 分支通过 Pre-Assess 判断是否相关，明确不适用时仍保留必要检查及 Gate。
 
 ## Node Gate 与并行审核
 

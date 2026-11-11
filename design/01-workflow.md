@@ -178,6 +178,8 @@ Combination: feature:login × layer:domain
 
 各 Gate 审核同一 Attempt 的固定输出，可并行执行；相同模式也分别记录，不按 Facet 顺序执行，不额外增加 Workflow 总审核。Gate 是 Combination 的审核项，不形成 DAG 业务节点，也不让原始 Node 独立执行。决策与异常处理见 [Governance](03-governance.md)。
 
+每个 Combination 接收完整 Requirement，并结合所选 Node 的目标、约束与 Scope 确定当前职责。各 Gate 从自己的角度审核该职责内的成果；批准表示当前组合可以继续推进，不表示整个需求已经实现。后续节点负责的工作尚未完成，不单独构成当前组合的拒绝理由，但不能据此忽略当前职责、固定约束或必要检查。
+
 ### 排除规则
 
 键是 Facet ID，值是该 Facet 的普通 Node ID 列表。规则匹配最终 Combination 的 `members` 来源映射。
@@ -286,6 +288,35 @@ Node 列表顺序只用于稳定表示，不是依赖。每张 Facet DAG 必须�
 Scope 约束代码写入，不授予额外访问权。读取项目、依赖和资料受 Runtime 读取策略限制，不取各 Node Scope 的交集。
 
 Workflow 的 Facet 引用相对 Workflow 文件解析；Facet 和 Node 的资料引用相对 Facet 文件解析。路径经规范化并解析符号链接后不得越出仓库。Workflow、Facet、Node 和 Scope 的 ID 使用 `[A-Za-z0-9][A-Za-z0-9_-]*`，避免与路径、Combination ID 分隔符混淆。
+
+## Facet 顺序与验证位置
+
+以下使用同一组定义，不配置排除规则；图中省略 start/end：
+
+~~~text
+feature:      login 与 notification 两个独立分支
+verification: implement（实施）→ verify（验证）
+~~~
+
+`feature ▷ verification`：每个 Feature 内复制一条实施与验证链。login 的实施成果通过 Gate 后，其验证即可启动，无需等待 notification。
+
+~~~mermaid
+flowchart LR
+    LI[login × implement] --> LV[login × verify]
+    NI[notification × implement] --> NV[notification × verify]
+~~~
+
+`verification ▷ feature`：外层的实施和验证节点各替换为一份 Feature 子图。实施子图的全部出口连接验证子图的全部入口，因此每个验证节点都等待两个实施节点的成果通过 Gate，并汇聚它们的输出。
+
+~~~mermaid
+flowchart LR
+    IL[implement × login] --> VL[verify × login]
+    IL --> VN[verify × notification]
+    IN[implement × notification] --> VL
+    IN --> VN
+~~~
+
+该例的阶段屏障来自外层 `implement → verify` 依赖与节点替换积，Facet 名称没有特殊调度语义。Verification 也不自动具有只读权限，写入边界仍由 Scope 与 Runtime 策略决定。两种顺序均须完成最终 `integration.checks` 与人类交付确认；节点验证不替代整体验收。
 
 ## 执行上下文
 

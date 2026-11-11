@@ -74,12 +74,7 @@ Layer Facet:
 start → Domain → Application → Presentation → end
 ```
 
-Facet 内的边同时表示：
-
-- 后继 Node 可以读取前驱 Node 的定义或成果；
-- 在同一需求和同一组其他 Facet 选择下，前驱对应的 Combination Node 必须先完成或达到可继续的状态。
-
-Source Facet 之间不建立边。Feature 的分支不会因为 Layer 的分支而合并成一条人工指定的线性顺序。
+Facet 内的边表达依赖顺序；Node 自身不执行或产生成果。Workflow 按声明顺序应用节点替换积，将这些依赖展开为 Combination 之间的依赖。Source Facet 之间不直接连边，成果由运行时按最终组合 DAG 汇聚。
 
 ### 3.2 Combination Facet 与 Combination Node DAG
 
@@ -93,13 +88,13 @@ Login × Application
 Login × Presentation
 ```
 
-对于任意 Source Facet 中的边 `u → v`，在其他 Facet 的选择保持不变时，向 Combination Node DAG 提升对应的边：
+Workflow 按声明顺序从外到内应用节点替换积。`G ▷ H` 将 G 的每个普通节点替换为一份 H 的实际子图；对 G 的依赖 `u → v`，连接 u 副本的全部出口与 v 副本的全部入口：
 
 ```text
-(..., u, ...) → (..., v, ...)
+u 内的 H 子图：全部出口 → v 内的 H 子图：全部入口
 ```
 
-因此上面的两个 Source Facet 会形成：
+因此 `feature ▷ layer` 会形成以下分支，省略最终 end：
 
 ```text
 Combination Facet
@@ -121,7 +116,9 @@ start
 
 `Login × Domain` 与 `Notification × Domain` 之间没有依赖，因此可以并行。执行顺序由合并后的 Combination Node DAG 决定；字典序不再是执行规则，最多只能作为同一批就绪节点的稳定展示或调度顺序。
 
-当多个前置路径在同一个 Combination Node 汇聚时，该汇聚节点负责接收、比较并处理前置结果之间的冲突，形成后续执行所需的统一输入。Workflow Runtime 只负责等待依赖满足并启动节点，不替汇聚节点做业务冲突裁决；节点无法处理的冲突应进入 Gate 或阻塞状态。
+替换积不满足交换律，调换 Facet 顺序可能改变并行与汇聚关系。内层只保留实际节点，最外层保留 start/end；完整算法见 [Workflow](design/01-workflow.md#组合-dag-的生成规则)，顺序影响见 [验证位置对比](design/01-workflow.md#facet-顺序与验证位置)。
+
+当多个前置路径在同一个 Combination Node 汇聚时，Runtime 通过 Git Manager 按固定算法形成输入和冲突清单。当前 Attempt 的 Agent 在有效 Scope 内解决代码集成冲突；越界冲突或前驱行为不符合需求时交错误 Gate 处置，不静默修改上游责任。
 
 Combination Facet 在 Workflow 版本内固定。Requirement 启动时创建该 Combination Facet 的运行实例，记录上下文快照、执行状态和结果，但不重新定义另一张结构不同的 DAG。Workflow 修改后产生新版本，已有运行继续使用原版本。
 
@@ -136,7 +133,7 @@ Combination Facet 在 Workflow 版本内固定。Requirement 启动时创建该 
 
 也可以在后续增加 Quality Facet（Security、Accessibility、Performance 等），而不需要发明新的底层 Node 类型。
 
-**Verification Source Facet** 是用于需求验收、集成验证或其他验证用途的显式源切面。用户在其中创建验证用途的 Facet Node；这些节点仍只提供上下文，经过条件过滤并组合后才成为可执行的 Combination Node，不形成独立的 Requirement Gate。
+**Verification Source Facet** 是用户定义的验证维度，按普通 Node 与组合规则执行。验证范围和等待关系取决于 Facet 顺序、拓扑及上下文，名称不产生特殊调度语义；最终集成检查与人类交付确认仍负责整体验收。
 
 ### 3.4 组合上下文的构成
 
@@ -145,7 +142,7 @@ Combination Facet 在 Workflow 版本内固定。Requirement 启动时创建该 
 - 原始 Requirement 与已确认的需求约束；
 - Workflow 的全局规则；
 - 当前 Combination Node 选中的各 Source Facet Node 上下文（例如 Login + Domain）；
-- 当前 Requirement Worktree 的代码、历史与已产出的 Artifact 引用；
+- 当前 Attempt 的输入代码、已接受前驱成果及 Artifact 引用；
 - 适用的权限、环境与 Gate 策略。
 
 **原则**：上下文是层层绑定的；不同 Node 的约束冲突时不能默默以后者覆盖前者，应暂停并进入评估或 Gate。
@@ -160,7 +157,7 @@ Workflow 按声明顺序对 Facet DAG 应用节点替换积，先生成完整 Co
 - `Login × Domain × Accessibility`：一般不需要专门的 UI 无障碍检查；
 - 认证、授权及敏感数据相关组合：需考虑 Security 检查。
 
-条件过滤规则的完整表达式、校验方式和不确定条件的处理，留待 Design。无法可靠判断是否应纳入关键检查时，不应默认过滤；安全底线不应仅靠 Feature 名称决定。
+静态 exclude 仅按 Facet→Node 来源映射匹配，格式与校验见 [排除规则](design/01-workflow.md#排除规则)。上例是配置时的判断依据，不是运行时 AI 自动删节点的规则。运行时是否适用由 Pre-Assess 留存理由与证据；无法判断进入错误 Gate，不默认跳过验证。
 
 ### 3.6 Workflow 与 DAG 的激活不变量
 
@@ -221,7 +218,7 @@ Combination Worker     // 承载 Attempt 的容器、Worktree 与调用
 
 ### 4.2 Execution 与 Artifact
 
-Combination Worker 中的 Agent 在隔离环境中操作**当前 Requirement 的 Worktree**。Artifact 可以是 Markdown 规范、接口 Schema、源码、测试报告、原型等。Combination Node 之间传递的主要是**路径和 Git 内容引用**，而不是复制一套独立 Artifact 数据库。
+Combination Worker 中的 Agent 在隔离环境中操作**当前 Attempt 的 Worktree**。同一 Requirement 内并行的 Attempt 使用不同 Worktree。Artifact 可以是 Markdown 规范、接口 Schema、源码、测试报告、原型等；组合间通过固定代码输入与证据引用衔接。
 
 ### 4.3 Post-Assess 与 Gate
 
@@ -232,6 +229,8 @@ Post-Assess 检查是否遗漏相关变更、是否引入其他模块影响。Ga
 ## 5. Gate：对齐与验证
 
 Gate 持续检查组合成果是否符合人类需求、架构和功能行为。Gate 有 human、ai_assisted、ai、script 四种模式，分别由人类、人类、AI、程序决策。成果项可以并行；执行失败或成果拒绝由 Workflow 错误 Gate 决定重试、上游修复、等待或停止，评估器自身故障交给人类。最终交付仍由人类确认。
+
+每个组合读取完整 Requirement，各 Gate 从所选 Node 的角度审核当前职责内的成果。局部批准不表示整个需求已完成，后续节点负责的工作也不要求在当前节点提前实现；当前约束与必要检查始终有效。示例见 [需求对齐表](design/07-demo.md#同一需求如何从不同角度对齐)。
 
 Requirement 不拥有独立 Gate；Verification Facet 表达节点级验证，最终集成检查验证整体结果。执行与必要检查完成后固定审核输入；Gate 报告属于审核输出，不回写执行证据。补测或修改成果需要新 Attempt，不能复用旧批准。审核定义统一进入 Git，执行与评估的实际初始请求通过持久 Artifact 留存。
 
@@ -336,7 +335,7 @@ Runtime 持久化本地就绪队列、活动 Attempt、Worker/容器引用、重
 5. `Login × Application`：在 Domain 节点满足依赖后启动 Worker，读取 Domain 结果，更新 Use Case 与状态接口，生成 Commit 并审核。
 6. `Login × Data`：在其前置依赖满足后判断需要保存失败次数，实现 Adapter 和测试，提交检查点。
 7. `Login × Presentation`：在前置依赖满足后修改 BLoC/UI 状态与倒计时提示，经过 UI 对齐 Gate。
-8. 适用的 Security/Accessibility Combination Node 分别验证安全边界与界面可用性；适用性处理规则另行设计。
+8. 如配置 Security/Accessibility 维度，相关 Combination Node 按固定 DAG 验证安全边界与界面可用性；Pre-Assess 判断适用性，明确不适用仍完成必要检查与 Gate。
 9. 如果 UI Gate 发现 Domain 缺少某条业务规则，返回 `Login × Domain`，Runtime 重新启动对应 Worker，并让受影响的后继节点重新 Assess。
 10. 执行集成测试，形成需求的最终候选版本；经人类确认后，以一个 squash Commit 同时将需求、代码、精简档案和回执提交 main，不追加回执提交。
 11. 使用 Refinement 筛选返工记录，采纳并验证改进后清理已处理项。
@@ -356,7 +355,7 @@ Runtime 持久化本地就绪队列、活动 Attempt、Worker/容器引用、重
 | 容器访问主仓库和宿主机 | Rootless Podman + 最小权限挂载 + 宿主机 Git Manager |
 | clone 间运行状态有延迟 | 本地状态留在 Runtime；执行与 Gate 本地保存，采纳时将必要摘要和依赖归档 main；未采纳记录显式导出快照 |
 
-## 12. 第一版验证范围与待确认事项
+## 12. 第一版验证范围与设计入口
 
 ### 最小可验证闭环（MVP）
 
@@ -364,19 +363,21 @@ Runtime 持久化本地就绪队列、活动 Attempt、Worker/容器引用、重
 2. 固定生成一个 Combination Facet 及其 Combination Node DAG；Runtime 按 DAG 找到就绪节点并允许无依赖分支并行。
 3. 实现 Combination Worker 的 `Pre-Assess → Agent Execution → 本地 Checkpoint → 各 Node 的 Gate 全部批准`。
 4. Gate 可定向返回上游 Combination Node；修复后重新执行受影响的下游节点。
-5. 每个 Requirement 独立 Worktree 和 Rootless Podman；Runtime 持久化执行和 Gate，采纳时归档精简记录到 main。
+5. 每个执行的 Attempt 使用独立 Worktree 和 Rootless Podman 环境；Runtime 持久化执行和 Gate，采纳时归档精简记录到 main。
 6. Workflow 完成后运行集成验证，经人类确认，以一个 squash Commit 保存需求、代码、档案和回执。
 7. WebUI 提供 Facet 编辑、组合预览、Gate 审核、执行历史与 Refinement。
 
-### 仍待明确（不要误认作既定设计）
+### 详细设计入口
 
-- **定义阶段条件过滤规则**：条件表达式、AI 辅助判断及“不确定”的处理边界。
-- **Combination Node 状态**：`Not Applicable`、`No Change`、`Approved` 等状态的精确定义，以及状态如何满足后继依赖。
-- **并行集成策略**：并发上限、并行 Worker 的 Worktree 合并、冲突处理和汇合节点的共同快照。
-- **上下文来源与优先级**：不同 Node 的输入和约束冲突时的确定流程。
-- **回退影响分析**：先采取保守重评估，再逐步建立精确依赖。
-- **精细授权**：四种 Gate 模式统一使用固定策略；后续按实际需求评估多用户委托，最终采纳保持人类确认。
-- **多用户**：只需多个浏览器控制同一 Owner 的实例，还是需要真正的多人审批与权限分离。
+| 问题 | 权威定义 |
+| --- | --- |
+| Facet 顺序、组合、排除、上下文与 Scope | [Workflow](design/01-workflow.md) |
+| 运行状态、成果接受与上游修复传播 | [Requirement](design/02-requirement.md) |
+| 适用性、必要检查、代码汇聚与最终交付 | [Execution](design/04-execution.md) |
+| Gate 与运行后的精炼 | [运行治理](design/03-governance.md) |
+| 并发、容器、事务与 clone 协作 | [Services](design/05-services.md) |
+
+精确影响分析、选择性重验证、多用户精细权限及长期治理等扩展统一见 [实现路线](plan.md)。
 
 ---
 

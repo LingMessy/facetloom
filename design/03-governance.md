@@ -1,6 +1,6 @@
 # 运行治理：Gate 与 Refinement
 
-本文件定义单次 WorkflowRun 内的授权、审核、恢复和证据处理，不定义跨 Requirement、Commit 或 Release 的长期治理系统。成果 Gate 按 Node 要求审核 Combination 输出；错误 Gate 决定执行失败或成果拒绝后的处理动作。Refinement 将运行经验转化为改进。正式定义发布、最终代码交付和精炼采纳由人类确认。
+本文件定义运行内的审核与错误处置，以及运行后的 Refinement。成果 Gate 按 Node 要求审核 Combination 输出；错误 Gate 决定执行失败或成果拒绝后的处理动作。Refinement 是独立的记录筛选与改进会话，不属于原 WorkflowRun 的执行或采纳步骤。正式定义发布、最终代码交付和精炼采纳由人类确认。跨需求的持续监测与长期治理系统留在发展路线中。
 
 运行对象先保存在 `.facetloom/.runtime/runs/<run-id>/`，本地事务落地即生效；仅最终采纳时选取必要记录及依赖闭包加入 main。下文路径以采纳档案表示，执行期间使用相同相对布局。
 
@@ -29,6 +29,8 @@
 | script | 程序按规则评审并返回结构化结果 | 程序 |
 
 以上四种模式同时适用于成果 Gate 和错误 Gate。每个选中 Node 都贡献一项成果 Gate，未声明字段继承 Workflow 默认；解析规则见 [Workflow](01-workflow.md)。`gate_id = facet_id/node_id`，在当前 Combination 内唯一。Gate 评估该 Combination 的当前 Attempt；Requirement 不另设 Gate，最终交付保持人类确认。
+
+审核依据是完整 Requirement、当前组合的职责与固定策略。以 `login × domain` 为例，Feature Gate 判断锁定行为是否符合需求，Layer Gate 判断领域规则与依赖边界是否合格；界面提示由后续组合实现，不要求领域组合提前完成。发现当前成果违背需求或无法支持后续工作时仍应指出问题。全部局部 Gate 批准只代表节点成果被接受，整体验收仍须最终集成检查与人类确认。
 
 ```mermaid
 flowchart LR
