@@ -25,6 +25,18 @@ flowchart LR
 | Attempt | 节点的一次准备、执行与审核；重试创建新 Attempt |
 | DeliveryRecord | 一次成功采纳的不可变回执；与成果同 Commit 保存 |
 
+### 运行对象生命周期
+
+| 层级 | 作用与生命周期 |
+| --- | --- |
+| Facet Node | 一个维度的上下文与职责；保存在 Facet 定义中，没有独立运行记录 |
+| Combination Node | 多个 Facet Node 的成员映射及依赖；生成后固定在本次 Run 的 DAG Snapshot 中 |
+| CombinationRun | 当前组合的状态与有效成果引用；同一 WorkflowRun 中每个业务组合一条 |
+| Attempt | 一次准备、执行、检查和审核尝试；可含多次外部调用，准备失败时可以尚无 Worker 或成果 |
+| GateDecision | 对某个 Attempt 的固定成果或错误材料作出的决定；纯人工模式无需先有 GateReport |
+
+错误 Gate 安排重试、上游修复或冻结后补测时创建新 Attempt；预算内修复与重检仍属于同一 Attempt。新 Attempt 不继承旧批准；单纯重评已有冻结材料不创建 Attempt。全部 CombinationRun 满足后，还需通过最终集成检查、形成 IntegrationReport，并由人类确认交付。
+
 ## Requirement 文件与生命周期
 
 ```text

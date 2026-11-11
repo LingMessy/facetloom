@@ -12,7 +12,7 @@ Workflow 与 Facet 表达上下文和依赖，Combination 承担执行，Runtime
 
 一个需求最终对应 main 上一次 squash 采纳提交，同时保存需求、代码和精简运行档案。执行和 Gate 在本地事务落地后生效，失败或放弃不提交 main。本地状态恢复活动运行，Git 共享已发布档案与证据引用，大型内容经独立 Artifact 交换包按需传递。Refinement 通过人机交互筛选记录、提出改进，落实并验证后清理已处理记录。
 
-具体文件、状态机、交付与精炼协议见 design；本文件解释产品动机和可能的扩展。
+具体文件、状态机、交付与精炼协议见 design；本文件解释产品动机和可能的扩展。Source Facet、Facet Node、Combination Node 在设计中简称 Facet、Node、Combination；本文的 Combination Facet 指派生的 Combination DAG，不另设对象或文件。
 
 ## 1. 出发点与目标
 
@@ -200,8 +200,8 @@ Runtime 根据 Combination Node DAG 找到所有前置节点已经满足依赖�
 
 ```text
 Combination Node       // Workflow 版本中的静态节点
-Combination Node Run   // 某次 Requirement 运行中的节点记录
-Combination Attempt    // 一次实际尝试或重试
+CombinationRun        // 某次 Requirement 运行中的节点记录
+Attempt               // 一次实际尝试或重试
 Combination Worker     // 承载 Attempt 的容器、Worktree 与调用
 ```
 

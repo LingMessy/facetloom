@@ -1,6 +1,6 @@
 # Workflow 与 Combination DAG
 
-Workflow 是执行图的生成规则。Facet 提供一个上下文维度；Node 是该维度中的上下文节点；Combination 才是实际执行单元。
+Workflow 是执行图的生成规则。Facet 提供一个上下文维度；Facet Node 是该维度中的上下文节点；Combination Node 才是组合后进入运行的静态执行单元。
 
 ## 对象关系
 
@@ -8,13 +8,17 @@ Workflow 是执行图的生成规则。Facet 提供一个上下文维度；Node 
 flowchart TB
     WF[Workflow] --> F1[Facet: feature]
     WF --> F2[Facet: layer]
-    F1 --> N1[Node]
-    F2 --> N2[Node]
-    N1 --> P[组合候选]
+    F1 --> N1[Facet Node]
+    F2 --> N2[Facet Node]
+    N1 --> P[节点替换积]
     N2 --> P
-    P --> X[静态过滤]
+    P --> X[排除与传递约简]
     X --> DAG[Combination DAG]
-    DAG --> CR[CombinationRun]
+    DAG --> CN[Combination Node]
+    CN --> CR[CombinationRun]
+    CR --> AT[Attempt]
+    AT --> W[Worker / 外部 Agent]
+    AT --> G[Gate]
 ~~~
 
 | 对象 | 说明 | 是否执行 |
@@ -22,10 +26,28 @@ flowchart TB
 | Workflow | Facet 引用、排除规则、执行策略、Gate 策略 | 否 |
 | Facet | 一个上下文维度及其内部 DAG | 否 |
 | Node | Facet 中的上下文节点 | 否 |
-| Combination | 由有序 Facet 组合生成、带 Facet→Node 来源向量的实际节点 | 是 |
+| Combination Node | 由有序 Facet 组合生成、带 Facet→Node 来源向量的业务节点 | 是；通过 CombinationRun / Attempt 执行 |
 | start / end | 图的控制节点 | 否 |
 
 Facet 之间不直接连边。Workflow 按 `facets` 声明顺序，对每个 Facet DAG 连续应用节点替换积，生成更大的 Combination DAG。Facet 顺序是图语义的一部分：替换积不满足交换律，调换 Facet 顺序可能改变依赖拓扑。
+
+### 从定义对象到运行对象
+
+```text
+Facet Node
+  └─ 只提供一个维度的上下文、Scope、检查和 Gate 声明
+       ↓ 按 Workflow 顺序组合
+Combination Node
+  └─ 固定多个 Facet Node 的组合上下文，属于 DAG Snapshot
+       ↓ 在一次 WorkflowRun 中实例化
+CombinationRun
+  └─ 保存该组合当前的状态和 accepted_attempt_id
+       ↓ 每次准备、执行、重试或补测
+Attempt
+  └─ 准备并固定输入，最多关联一个 Worker，记录检查、Checkpoint 和 Gate
+```
+
+Facet Node 没有独立运行记录，也不直接调用 Agent。Combination Node 是静态图节点；CombinationRun 是它在一次 WorkflowRun 中的唯一运行记录。Attempt 可包含预检、执行、预算内修复和自检等多次 Invocation；错误恢复或冻结后补测创建新 Attempt，同次检查修复仍在原 Attempt 内。Gate 审核固定成果或错误材料。完整生命周期见 [Requirement](02-requirement.md#运行对象生命周期)。
 
 ## 文件布局
 
@@ -139,59 +161,6 @@ network: outbound
 
 Run 启动时解析执行与 AI 评估所引用的全部 runner，保存完整 profile、来源文件引用和 profile 的 JCS SHA-256 摘要。source_refs 包含 runner 文件及 config_refs 的全部原生配置文件，均固定到 source_commit 并校验内容摘要；profile_digest 不代替来源文件校验。后续 Attempt 与评估调用只引用这些固定配置；定义缺失或格式错误拒绝创建 Run，运行能力不足按执行错误或评估器故障分别处理。调用与取消协议见 [Services](05-services.md)。
 
-### 必要检查
-
-Workflow 的 `execution.checks` 提供默认检查，普通 Node 的 `execution.checks` 追加检查。每项含唯一 `id`、非空 `argv` 参数数组和正整数 `timeout_seconds`；ID 格式同 Node ID。允许省略或空列表。命令不经 Shell 展开。
-
-~~~yaml
-# Node 片段
-id: domain
-role: regular
-execution:
-  checks:
-    - id: boundaries
-      argv: [pytest, -q, test/auth/test_boundaries.py]
-      timeout_seconds: 120
-~~~
-
-有效检查按 Workflow → facets 声明顺序 → 各列表顺序累积，不能覆盖或移除。限定 ID 为 `workflow/<id>` 或 `<facet>/<node>/<id>`，同一声明者内部不能重复。`execution.max_check_retries` 仅在 Workflow 配置。修复、全量重检和 CheckReport 对象见 [Execution](04-execution.md)。`integration.checks` 独立用于交付，不替代节点检查。
-
-### 错误 Gate
-
-每个 Workflow 只有一项错误 Gate，`gate_id = workflow/error`。它决定重试当前节点、修复祖先、等待或停止，不接受代码成果。省略 `error_gate` 时等同 `mode: human, max_auto_recoveries: 3`；其他模式要求匹配的 evaluator。审核上下文只取自身声明，不继承 Node Gate。
-
-启动 Run 时校验并把完整有效错误策略固定到 run.yaml，因此尚未形成 Context Snapshot 时也能处置错误。错误策略、成果策略、检查及引用无效时拒绝创建 Run，不调用错误 Gate 修复定义。协议见 [Governance](03-governance.md)。
-
-### Node Gate 与组合审核
-
-每个选中 Node 为 Combination 贡献一项 Gate，标识为 `facet_id/node_id`。`mode` 和 `evaluator` 分别按 Node → Workflow 解析；模式最终缺省为 `human`。Node 未声明 `gate` 时完整继承默认配置。有效模式为 `human` 时不调用评估器，快照中的 evaluator 为 null；其他模式缺少评估器或类型不匹配时校验失败。
-
-Workflow 与 Node 的 `gate.context` 使用 `objective`、`constraints`、`references`，字段格式同任务 context。目标与约束累积，资料去重并保留声明来源；不按 Node 顺序覆盖，运行准备时发现语义冲突则进入错误 Gate。资料路径相对各自声明文件解析，再固定到 source_commit。
-
-~~~text
-Combination: feature:login × layer:domain
-├── feature/login：继承 Workflow 的 human
-└── layer/domain：Node 指定 ai + domain-reviewer
-                       ↓
-                 两项都批准才接受成果
-~~~
-
-各 Gate 审核同一 Attempt 的固定输出，可并行执行；相同模式也分别记录，不按 Facet 顺序执行，不额外增加 Workflow 总审核。Gate 是 Combination 的审核项，不形成 DAG 业务节点，也不让原始 Node 独立执行。决策与异常处理见 [Governance](03-governance.md)。
-
-每个 Combination 接收完整 Requirement，并结合所选 Node 的目标、约束与 Scope 确定当前职责。各 Gate 从自己的角度审核该职责内的成果；批准表示当前组合可以继续推进，不表示整个需求已经实现。后续节点负责的工作尚未完成，不单独构成当前组合的拒绝理由，但不能据此忽略当前职责、固定约束或必要检查。
-
-### 排除规则
-
-键是 Facet ID，值是该 Facet 的普通 Node ID 列表。规则匹配最终 Combination 的 `members` 来源映射。
-
-~~~yaml
-exclude:
-  - feature: [notification]
-    layer: [application]
-~~~
-
-一条规则中，不同 Facet 的条件为 AND，同一 Facet 列表为 OR；规则之间为 OR。未列出的 Facet 不限。空规则、空列表、未知 Facet、未知 Node 或控制节点 ID 都是配置错误。匹配规则是静态定义校验的一部分；运行时 Applicability 不增删 DAG 节点。
-
 ## Facet 与 Node
 
 Facet 路径：.facetloom/facets/<facet-id>/facet.yaml
@@ -289,6 +258,87 @@ Scope 约束代码写入，不授予额外访问权。读取项目、依赖和�
 
 Workflow 的 Facet 引用相对 Workflow 文件解析；Facet 和 Node 的资料引用相对 Facet 文件解析。路径经规范化并解析符号链接后不得越出仓库。Workflow、Facet、Node 和 Scope 的 ID 使用 `[A-Za-z0-9][A-Za-z0-9_-]*`，避免与路径、Combination ID 分隔符混淆。
 
+## 执行上下文
+
+Context Snapshot 由以下来源合成：
+
+~~~mermaid
+flowchart LR
+    R[Requirement] --> C[Context Snapshot]
+    W[Workflow] --> C
+    F[Facet shared context] --> C
+    N[Selected Node context + Scope] --> C
+    P[Accepted predecessor outputs] --> C
+    G[各 Node 的有效 Gate 策略与审核上下文] --> C
+~~~
+
+引用资料保留来源并按内容去重；目标和约束累积，不按列表顺序覆盖。约束冲突进入错误 Gate。一个 Scope 内的路径取并集，各选中 Node 的 Scope 之间取交集；未声明 Scope 不增加限制。有效写入范围再与 Runtime 写入策略取交集，读取范围单独由 Runtime 决定。
+
+空交集表示只读，允许有证据的 no_change 或 not_applicable；需要修改则报错，不自动扩权。Runtime 校验新增、删除、文件模式、重命名两端和符号链接目标，禁止通过路径或链接越界。自动汇聚已接受前驱的变更不受当前节点 Scope 重新裁剪；Agent 对汇聚输入的新增修改仍受约束。冲突路径必须全部在有效写入范围内，否则进入错误 Gate；逐项解决清单和确定性 conflict_id 见 [Execution](04-execution.md)。
+
+Snapshot 保存有效输入清单，Adapter 实际发送的预检上下文另通过 Attempt.agent_input_ref 留存。正式 Pre-Assess 使用独立只读调用；缺少输入进入错误 Gate，风险作为证据交给已配置的成果 Gate。适用性与后续执行结果按 [Execution](04-execution.md) 的结构化协议校验；必要测试和只读 Post-Assess 完成后冻结审核输入，再启动各项 Gate。
+
+动态 Applicability 和 Pre-Assess 在 Attempt 中执行，不改变组合 DAG。明确不适用时跳过代码执行但仍完成必要检查、Post-Assess 和所有成果 Gate；无法判断时进入错误 Gate，不能默认跳过 Workflow 要求的验证。
+
+### 必要检查
+
+Workflow 的 `execution.checks` 提供默认检查，普通 Node 的 `execution.checks` 追加检查。每项含唯一 `id`、非空 `argv` 参数数组和正整数 `timeout_seconds`；ID 格式同 Node ID。允许省略或空列表。命令不经 Shell 展开。
+
+~~~yaml
+# Node 片段
+id: domain
+role: regular
+execution:
+  checks:
+    - id: boundaries
+      argv: [pytest, -q, test/auth/test_boundaries.py]
+      timeout_seconds: 120
+~~~
+
+有效检查按 Workflow → facets 声明顺序 → 各列表顺序累积，不能覆盖或移除。限定 ID 为 `workflow/<id>` 或 `<facet>/<node>/<id>`，同一声明者内部不能重复。`execution.max_check_retries` 仅在 Workflow 配置。修复、全量重检和 CheckReport 对象见 [Execution](04-execution.md)。`integration.checks` 独立用于交付，不替代节点检查。
+
+### Node Gate 与组合审核
+
+每个选中 Node 为 Combination 贡献一项 Gate，标识为 `facet_id/node_id`。`mode` 和 `evaluator` 分别按 Node → Workflow 解析；模式最终缺省为 `human`。Node 未声明 `gate` 时完整继承默认配置。有效模式为 `human` 时不调用评估器，快照中的 evaluator 为 null；其他模式缺少评估器或类型不匹配时校验失败。
+
+Workflow 与 Node 的 `gate.context` 使用 `objective`、`constraints`、`references`，字段格式同任务 context。目标与约束累积，资料去重并保留声明来源；不按 Node 顺序覆盖，运行准备时发现语义冲突则进入错误 Gate。资料路径相对各自声明文件解析，再固定到 source_commit。
+
+~~~text
+Combination: feature:login × layer:domain
+├── feature/login：继承 Workflow 的 human
+└── layer/domain：Node 指定 ai + domain-reviewer
+                       ↓
+                 两项都批准才接受成果
+~~~
+
+各 Gate 审核同一 Attempt 的固定输出，可并行执行；相同模式也分别记录，不按 Facet 顺序执行，不额外增加 Workflow 总审核。Gate 是 Combination 的审核项，不形成 DAG 业务节点，也不让原始 Node 独立执行。决策与异常处理见 [Governance](03-governance.md)。
+
+每个 Combination 接收完整 Requirement，并结合所选 Node 的目标、约束与 Scope 确定当前职责。各 Gate 从自己的角度审核该职责内的成果；批准表示当前组合可以继续推进，不表示整个需求已经实现。后续节点负责的工作尚未完成，不单独构成当前组合的拒绝理由，但不能据此忽略当前职责、固定约束或必要检查。
+
+### 错误 Gate
+
+每个 Workflow 只有一项错误 Gate，`gate_id = workflow/error`。它决定重试当前节点、修复祖先、等待或停止，不接受代码成果。省略 `error_gate` 时等同 `mode: human, max_auto_recoveries: 3`；其他模式要求匹配的 evaluator。审核上下文只取自身声明，不继承 Node Gate。
+
+启动 Run 时校验并把完整有效错误策略固定到 run.yaml，因此尚未形成 Context Snapshot 时也能处置错误。错误策略、成果策略、检查及引用无效时拒绝创建 Run，不调用错误 Gate 修复定义。协议见 [Governance](03-governance.md)。
+
+## 节点替换积
+
+每个 Facet 是带虚拟 `start/end` 的合法 DAG。按声明顺序计算节点替换积；`G ▷ H` 表示将 G 的每个实际节点替换为一份 H 的实际子图，消除 H 副本的虚拟边界，并按 H 的全部入口/出口接续 G 的依赖。仅保留最外层 `start/end`。形式定义、合法性和边构造见 [节点替换积规范](dag/DAG_节点替换积_规范.md)。
+
+例如 Feature 在外、Layer 在内。下图是排除之前的完整替换积：
+
+~~~mermaid
+flowchart LR
+    FD[feature:login × layer:domain] --> FA[feature:login × layer:application]
+    FD --> FB[feature:login × layer:data]
+    FA --> FP[feature:login × layer:presentation]
+    FB --> FP
+    ND[feature:notification × layer:domain] --> NA[feature:notification × layer:application]
+    ND --> NB[feature:notification × layer:data]
+    NA --> NP[feature:notification × layer:presentation]
+    NB --> NP
+~~~
+
 ## Facet 顺序与验证位置
 
 以下使用同一组定义，不配置排除规则；图中省略 start/end：
@@ -318,45 +368,19 @@ flowchart LR
 
 该例的阶段屏障来自外层 `implement → verify` 依赖与节点替换积，Facet 名称没有特殊调度语义。Verification 也不自动具有只读权限，写入边界仍由 Scope 与 Runtime 策略决定。两种顺序均须完成最终 `integration.checks` 与人类交付确认；节点验证不替代整体验收。
 
-## 执行上下文
+## 排除规则
 
-Context Snapshot 由以下来源合成：
+排除发生在完整 Combination DAG 生成之后。键是 Facet ID，值是该 Facet 的普通 Node ID 列表；规则匹配最终 Combination Node 的 `members` 来源映射。
 
-~~~mermaid
-flowchart LR
-    R[Requirement] --> C[Context Snapshot]
-    W[Workflow] --> C
-    F[Facet shared context] --> C
-    N[Selected Node context + Scope] --> C
-    P[Accepted predecessor outputs] --> C
-    G[各 Node 的有效 Gate 策略与审核上下文] --> C
+~~~yaml
+exclude:
+  - feature: [notification]
+    layer: [application]
 ~~~
 
-引用资料保留来源并按内容去重；目标和约束累积，不按列表顺序覆盖。约束冲突进入错误 Gate。一个 Scope 内的路径取并集，各选中 Node 的 Scope 之间取交集；未声明 Scope 不增加限制。有效写入范围再与 Runtime 写入策略取交集，读取范围单独由 Runtime 决定。
-
-空交集表示只读，允许有证据的 no_change 或 not_applicable；需要修改则报错，不自动扩权。Runtime 校验新增、删除、文件模式、重命名两端和符号链接目标，禁止通过路径或链接越界。自动汇聚已接受前驱的变更不受当前节点 Scope 重新裁剪；Agent 对汇聚输入的新增修改仍受约束。冲突路径必须全部在有效写入范围内，否则进入错误 Gate；逐项解决清单和确定性 conflict_id 见 [Execution](04-execution.md)。
-
-Snapshot 保存有效输入清单，Adapter 实际发送的预检上下文另通过 Attempt.agent_input_ref 留存。正式 Pre-Assess 使用独立只读调用；缺少输入进入错误 Gate，风险作为证据交给已配置的成果 Gate。适用性与后续执行结果按 [Execution](04-execution.md) 的结构化协议校验；必要测试和只读 Post-Assess 完成后冻结审核输入，再启动各项 Gate。
-
-动态 Applicability 和 Pre-Assess 在 Attempt 中执行，不改变组合 DAG。明确不适用时跳过代码执行但仍完成必要检查、Post-Assess 和所有成果 Gate；无法判断时进入错误 Gate，不能默认跳过 Workflow 要求的验证。
+一条规则中，不同 Facet 的条件为 AND，同一 Facet 列表为 OR；规则之间为 OR。未列出的 Facet 不限。空规则、空列表、未知 Facet、未知 Node 或控制节点 ID 都是配置错误。排除只改变静态 DAG，不由运行时 Applicability 动态增删节点。
 
 ## 组合 DAG 的生成规则
-
-每个 Facet 是带虚拟 `start/end` 的合法 DAG。按声明顺序计算节点替换积；`G ▷ H` 表示将 G 的每个实际节点替换为一份 H 的实际子图，消除 H 副本的虚拟边界，并按 H 的全部入口/出口接续 G 的依赖。仅保留最外层 `start/end`。形式定义、合法性和边构造见 [节点替换积规范](dag/DAG_节点替换积_规范.md)。
-
-例如 Feature 在外、Layer 在内。下图是排除之前的完整替换积：
-
-~~~mermaid
-flowchart LR
-    FD[feature:login × layer:domain] --> FA[feature:login × layer:application]
-    FD --> FB[feature:login × layer:data]
-    FA --> FP[feature:login × layer:presentation]
-    FB --> FP
-    ND[feature:notification × layer:domain] --> NA[feature:notification × layer:application]
-    ND --> NB[feature:notification × layer:data]
-    NA --> NP[feature:notification × layer:presentation]
-    NB --> NP
-~~~
 
 生成与排除按以下顺序执行：
 

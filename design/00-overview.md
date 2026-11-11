@@ -45,20 +45,20 @@ FacetLoom 编排外部 Agent，不实现模型推理或工具循环。Podman 镜
 
 | 对象 | 作用 | 保存位置 |
 | --- | --- | --- |
-| Requirement | UUID 标识的一次独立需求，冻结后不可变 | 本地草稿与冻结 Artifact；最终采纳写 main |
-| Workflow / Facet / Node / Scope | 执行图与上下文定义 | main |
-| Runner / Evaluator | 外部 Agent 调用配置及 AI / 脚本审核定义 | main；Run 固定解析结果与来源 |
-| Combination / DAG Snapshot | 固定的业务执行图 | 本地运行状态；采纳时归档 main |
-| WorkflowRun / CombinationRun / Attempt | 一次运行、一个节点及一次尝试的状态 | 本地事务生效；采纳时归档必要记录 |
-| Context Snapshot / Checkpoint | 固定一次尝试的输入与代码结果 | 本地不可变记录与持久引用 |
-| ErrorRecord | 准备、执行或成果拒绝的不可变错误材料 | 本地 errors/，采纳时选入精简档案 |
-| GateReport / GateDecision | 成果审核或错误处置的证据与决策 | 本地记录，采纳时加入 main |
-| CheckReport | 一个 Attempt 的检查轮次、候选 Tree 与执行结果 | 本地 reports/，采纳时选入精简档案 |
-| IntegrationReport / DeliveryRecord | 最终候选、检查与一次成功交付回执 | 本地记录，采纳时加入 main |
-| Refinement | 筛选记录、提出并落实改进的交互过程 | 本地会话；结果体现在 main 的修改与 Commit 描述 |
-| Worker / Invocation | 一个 Attempt 的执行生命周期及一次外部调用 | clone-local；必要调用证据导出为 Artifact |
-| Artifact / Artifact 交换包 | 大型证据及其显式跨 clone 传递 | 本地内容库；交换包经现有渠道独立传递 |
-| Runtime State | 队列、容器、本地事务与交付意图 | clone-local；SQLite 可选 |
+| [Requirement](02-requirement.md#requirement-文件与生命周期) | UUID 标识的一次独立需求，冻结后不可变 | 本地草稿与冻结 Artifact；最终采纳写 main |
+| [Workflow / Facet / Node / Scope](01-workflow.md#facet-与-node) | 执行图与上下文定义 | main |
+| [Runner](01-workflow.md#外部-agent-调用配置) / [Evaluator](03-governance.md#评估器与执行边界) | 外部 Agent 调用配置及 AI / 脚本审核定义 | main；Run 固定解析结果与来源 |
+| [Combination / DAG Snapshot](01-workflow.md#运行快照) | 固定的业务执行图 | 本地运行状态；采纳时归档 main |
+| [WorkflowRun / CombinationRun / Attempt](02-requirement.md#运行对象生命周期) | 一次运行、一个节点及一次尝试的状态 | 本地事务生效；采纳时归档必要记录 |
+| [Context Snapshot](04-execution.md#context-snapshot) / [Checkpoint](04-execution.md#checkpoint-与代码保留) | 固定一次尝试的输入与代码结果 | 本地不可变记录与持久引用 |
+| [ErrorRecord](03-governance.md#errorrecord) | 准备、执行或成果拒绝的不可变错误材料 | 本地 errors/，采纳时选入精简档案 |
+| [GateReport](03-governance.md#成果-gatereport-与评估协议) / [GateDecision](03-governance.md#成果-gatedecision) | 成果审核或错误处置的证据与决策 | 本地记录，采纳时加入 main |
+| [CheckReport](04-execution.md#checkreport) | 一个 Attempt 的检查轮次、候选 Tree 与执行结果 | 本地 reports/，采纳时选入精简档案 |
+| [IntegrationReport](04-execution.md#integrationreport) / [DeliveryRecord](04-execution.md#deliveryrecord) | 最终候选、检查与一次成功交付回执 | 本地记录，采纳时加入 main |
+| [Refinement](03-governance.md#refinement运行精炼) | 筛选记录、提出并落实改进的交互过程 | 本地会话；结果体现在 main 的修改与 Commit 描述 |
+| [Worker / Invocation](05-services.md#worker调用与会话) | 一个 Attempt 的执行生命周期及一次外部调用 | clone-local；必要调用证据导出为 Artifact |
+| [Artifact / Artifact 交换包](04-execution.md#artifact-存储与交换) | 大型证据及其显式跨 clone 传递 | 本地内容库；交换包经现有渠道独立传递 |
+| [Runtime State](05-services.md#本地文件事务) | 队列、容器、本地事务与交付意图 | clone-local；SQLite 可选 |
 
 Attempt 先以 preparing 持久化，再形成输入和 Context Snapshot；准备失败也有可审核的错误记录。Context Snapshot 保存有效上下文清单，交给外部程序的实际输入由 Attempt / GateReport 引用持久 Artifact。执行与必要检查完成后冻结审核输入；后续 Gate 报告是审核输出，不回写执行证据。审核定义统一由 source_commit 固定，本地只配置凭据、连接和资源上限。
 
@@ -172,6 +172,7 @@ Artifact URI 标识内容，不是下载地址。采纳归档前只要求拥有�
 
 ## 术语
 
+- **Facet / Node / Combination**：分别是 Source Facet、Facet Node、Combination Node 的简称；Combination DAG 承载静态组合节点，CombinationRun / Attempt 保存运行状态。
 - **当前有效成果**：CombinationRun 的 `accepted_attempt_id` 指向的输出；历史 accepted Attempt 不一定仍有效。
 - **运行完成**：所有业务 CombinationRun 都为 `satisfied`，不表示已经交付。
 - **已采纳档案**：与需求和代码一并进入 main 的精简记录；与本地执行状态及同步状态分别展示。

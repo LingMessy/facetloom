@@ -54,22 +54,44 @@ Verification Facet 可增加验证职责，验证等待哪些前驱取决于 Fac
 
 每个组合读取完整的冻结需求，再按所选 Node 的职责处理当前部分。下表说明登录限制需求的职责与证据，不新增运行字段或自动覆盖率判定；具体测试需在必要检查或 integration.checks 中配置。
 
+```mermaid
+flowchart TB
+    R[Requirement] --> G[Goal / Acceptance Criteria]
+    R --> REF[Constraints / References]
+    G --> CTX[完整需求上下文]
+    REF --> CTX
+    F[Feature Facet 的选中 Node] --> C[Combination Node]
+    L[Layer Facet 的选中 Node] --> C
+    V[可选 Verification Facet 的选中 Node] -. 配置后参与组合 .-> C
+    C --> CR[CombinationRun]
+    CR --> A[Attempt]
+    CTX --> A
+    A --> GT[各 Node Gate]
+    GT --> ALL[所有组合 satisfied]
+    ALL --> I[integration.checks 与 IntegrationReport]
+    I --> H[人类确认交付]
+```
+
+需求提供完整目标与验收依据，Facet 定义提供不同角度的职责；Requirement 不会自动生成或改写 Facet。一个 Acceptance Criteria 可以由多个组合共同实现和验证。本例使用 Feature 与 Layer 两个 Facet；加入 Verification 会生成另一张组合图，最终 integration.checks 始终是独立的交付检查。
+
 | 位置 | 当前职责 | 检查依据与证据 |
 | --- | --- | --- |
 | login × domain | 定义连续失败阈值、限制期与到期恢复规则 | 冻结需求及认证资料；领域边界测试、代码 Diff、CheckReport |
 | login × application | 将领域结果传递给登录接口，返回限制状态和剩余时间 | 领域输出与接口约定；接口测试、CheckReport |
 | login × data | 保存并读取规则所需的失败计数和限制状态 | 领域输出与存储约定；仓储测试、CheckReport |
 | login × presentation | 汇聚应用与数据成果，展示剩余时间及恢复状态 | 完整需求与前驱输出；界面测试、可复核界面证据、CheckReport |
+| 可选 Verification 组合 | 按所选节点职责验证行为、边界或安全性 | 固定验证上下文、按 DAG 汇聚的成果与检查证据 |
 | 最终集成与交付 | 验证从失败请求到限制生效、界面提示和恢复的完整行为 | 最终候选上的回归检查、IntegrationReport、人类确认 |
 
 每行是对现有需求与引用资料的职责解释；未明确的业务行为应在冻结前补齐，不能靠表格或 Agent 自行增加要求。领域成果通过审核时，界面尚未完成属于正常依赖顺序；若领域结果无法支持所需的剩余时间，则是当前成果应处理的问题。notification 分支通过 Pre-Assess 判断是否相关，明确不适用时仍保留必要检查及 Gate。
 
 ## Node Gate 与并行审核
 
+### Layer 节点配置
+
 Workflow 默认 `gate: {mode: human}`。Feature 的 Node 不声明 gate，继承人工审核；Layer 按审核目的配置：
 
 ```yaml
-# layer Facet 的 Node 配置片段
 nodes:
   - id: domain
     role: regular
@@ -96,10 +118,11 @@ nodes:
 
 执行 runner `developer` 与审核 runner `reviewer` 都固定到预装 Agent 和项目环境的镜像 digest，原生参数配置非交互调用。参数与 runner 文件格式见 [Workflow](01-workflow.md)，示例占位参数必须替换为所用 Agent 版本的真实参数。
 
-`domain-reviewer`、`ui-reviewer` 使用独立审核会话，例如：
+### AI 评估器配置
+
+`domain-reviewer`、`ui-reviewer` 使用独立审核会话。文件：`.facetloom/evaluators/domain-reviewer.yaml`。
 
 ```yaml
-# .facetloom/evaluators/domain-reviewer.yaml
 schema_version: 1
 id: domain-reviewer
 kind: ai
@@ -108,10 +131,13 @@ instruction: 检查锁定、到期恢复与领域隔离，引用证据并返回�
 timeout_seconds: 300
 ```
 
-`ui-reviewer` 使用相同结构并填写界面审核指令；`dependency-check` 使用脚本配置：
+`ui-reviewer` 使用相同结构并填写界面审核指令。
+
+### 脚本评估器配置
+
+文件：`.facetloom/evaluators/dependency-check.yaml`。
 
 ```yaml
-# .facetloom/evaluators/dependency-check.yaml
 schema_version: 1
 id: dependency-check
 kind: script
@@ -121,6 +147,8 @@ execution:
   environment_ref: <immutable-environment-ref>
   network: disabled
 ```
+
+### 组合接受条件
 
 | Combination | feature 的 Gate | layer 的 Gate | 接受条件 |
 | --- | --- | --- | --- |
@@ -132,6 +160,8 @@ execution:
 同名 `feature/login` 在不同 Combination / Attempt 中独立审核，不能沿用上一节点的批准。脚本正常返回 Rejected 表示成果不符合要求；脚本超时或退出失败则是评估故障，等待人类处理，其他独立项仍可继续。
 
 ## 从运行到交付
+
+以 `login × domain` 为例：Facet 定义中的 login 和 domain Node 组合成一个静态 Combination Node；本次 WorkflowRun 为它保存一条 CombinationRun，首次执行创建 Attempt。错误恢复创建新的 Attempt，同次预算内修复继续使用原 Attempt；审核依据始终绑定对应尝试。对象边界见 [运行对象生命周期](02-requirement.md#运行对象生命周期)。
 
 1. main 已有 Workflow、Facet、runner、审核配置和项目代码；本地准备固定 digest 的镜像与凭据。创建 UUID 需求草稿，写明目标和验收条件，无需 remote。
 2. 人类确认后冻结需求原始字节为 requirement_ref；Runtime 固定 source_commit，生成 DAG，本地事务创建 Run。此时 main 不变。

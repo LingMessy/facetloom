@@ -41,8 +41,8 @@ Refinement → 人类筛选记录 → Agent 建议 → 采纳并验证
 | 对象 | 含义 |
 | --- | --- |
 | Requirement | UUID 标识的独立需求；首次运行前冻结，内容变化创建新需求 |
-| Workflow / Facet / Node | 组合图规则、上下文维度和维度内节点 |
-| Combination | 节点替换积生成、带 Facet 来源映射的业务执行单元 |
+| Workflow / Facet（Source Facet）/ Node（Facet Node） | 组合图规则、上下文维度和维度内节点 |
+| Combination（Combination Node） | 节点替换积生成、带 Facet 来源映射的业务执行单元 |
 | WorkflowRun | 固定输入与 DAG 的一次运行 |
 | CombinationRun / Attempt | 一个节点的运行状态及一次执行、重试或评估 |
 | Runner | Git 管理的外部 Agent 调用配置 |
