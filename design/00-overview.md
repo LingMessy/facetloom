@@ -41,6 +41,8 @@ Workflow 按 Facet 声明顺序从外到内应用 DAG 节点替换积，例如 `
 
 FacetLoom 编排外部 Agent，不实现模型推理或工具循环。Podman 镜像预装 Codex、Claude Code、OpenCode、Pi Agent 等程序与项目环境，Git 中的 runner 固定镜像、原生参数和配置。Agent 可使用原生免审批模式，外层容器隔离、Scope 校验、必要检查与 Gate 仍由 FacetLoom 执行。
 
+需求默认以 AI 辅助模式起草，也可切换手动；模式与独立选择的起草 runner 保存在当前 clone，每个需求可覆盖。AI 仅处理草稿，人类审阅后冻结并决定启动。完整流程见 [需求起草](02-requirement.md#需求起草)。
+
 ## 对象与存储
 
 | 对象 | 作用 | 保存位置 |
@@ -142,8 +144,10 @@ Artifact URI 标识内容，不是下载地址。采纳归档前只要求拥有�
 │   └── deliveries/<delivery-id>.yaml
 └── .runtime/                             # 加入 gitignore
     ├── identity.yaml                     # 当前 clone 的稳定 runtime_id
+    ├── settings.yaml                     # 新需求默认起草模式与 runner
     ├── requirements/<uuid>/
     │   ├── requirement.md                # 本地草稿，冻结后字节不变
+    │   ├── drafting.yaml                 # 模式、runner、有效请求与处理记录
     │   └── frozen.yaml                   # ID 与 requirement_ref 的不可变绑定
     ├── runs/<run-id>/                    # 完整记录与 delivery.yaml 交付意图
     ├── transactions/<operation-id>/       # 事务清单、载荷与提交标记

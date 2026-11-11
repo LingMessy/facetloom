@@ -24,18 +24,20 @@ CLI 随各阶段提供可操作的验证入口。每阶段完成验收后进入�
 
 **依赖：** 当前设计规范。
 
-**交付物：** UUID Requirement 的本地草稿、冻结 Artifact 与最终文件、Workflow、Facet、Scope、runner 和评估器定义的解析与校验；有序节点替换积、静态排除、旁路与传递约简、稳定 Combination ID 和 DAG 快照；必要检查累积与独立错误策略校验；CLI 定义校验与图预览。
+**交付物：** UUID Requirement 的手动草稿、clone 本地默认设置与逐需求模式/runner 选择、按人类审阅摘要冻结的 Artifact 与最终文件、Workflow、Facet、Scope、runner 和评估器定义的解析与校验；有序节点替换积、静态排除、旁路与传递约简、稳定 Combination ID 和 DAG 快照；必要检查累积与独立错误策略校验；CLI 定义校验与图预览。
 
 **验收条件：**
 
 - 相同定义生成相同 DAG；Facet 顺序、分支、汇聚和排除后的关系符合设计；补边遍历顺序不影响最终约简边集。
 - 错误引用、环、悬空节点及全部节点被排除时拒绝生成运行；能查看每个 Combination 的 Gate 继承结果，runner、原生配置或评估器缺失、错配可定位；Run 完整固定执行与 AI 评估的调用配置及来源。
 
+- 手动起草不依赖 Agent 或 Workflow；初始模式为 ai_assisted，默认值只用于新需求，逐需求选择独立保存。冻结核对人类确认的字节摘要。此阶段不发起 AI 调用。
+
 ## 2. 单 clone 执行
 
 **依赖：** 阶段 1 的有效定义与 DAG。
 
-**交付物：** 稳定的 clone-local Runtime 身份；WorkflowRun、CombinationRun、Attempt 的文件事务及崩溃重放；preparing 阶段与 ErrorRecord；单 Worker 的 detached Worktree、预装外部 Agent 的 Podman 镜像及首个非交互 CLI Adapter；Worker / Invocation / 原生会话的独立记录；统一 Agent 证据导入协议；保留 Scope 分组的 Context Snapshot、实际初始请求留存、CheckReport、Checkpoint 和本地内容寻址 Artifact 库；本地记录与 main 写入隔离；CLI 启动和查看。
+**交付物：** 稳定的 clone-local Runtime 身份；WorkflowRun、CombinationRun、Attempt 的文件事务及崩溃重放；preparing 阶段与 ErrorRecord；单 Worker 的 detached Worktree、预装外部 Agent 的 Podman 镜像及首个非交互 CLI Adapter；Worker / Invocation / 原生会话的独立记录；统一 Agent 证据导入协议；保留 Scope 分组的 Context Snapshot、实际初始请求留存、CheckReport、Checkpoint 和本地内容寻址 Artifact 库；本地记录与 main 写入隔离；CLI 启动和查看；复用 Adapter 的独立需求起草调用、候选写回与 Diff、取消和恢复，以及 requirement 起草 CLI。
 
 **验收条件：**
 
@@ -49,6 +51,8 @@ CLI 随各阶段提供可操作的验证入口。每阶段完成验收后进入�
 - Pre-Assess、执行/修复、Post-Assess、AI Gate 与 Refinement 都可导入 `evidence_files`；传入 `evidence_refs` 仅允许引用本次请求白名单，Script Gate 只接受类型化引用。测试绝对/越界路径、符号链接、重复文件、数量和字节上限；导入任一文件失败时不发布部分结构化结果或报告。
 - `wait` 仅用于固定外部引用暂不可用；恢复后处置原错误，以相同 Snapshot 创建新 Attempt。需求内容变化用新 UUID；执行定义变化用新 Run，可显式停止同 Runtime 的旧 Run，不设置跨 clone 取消协议。
 - runner 总时限从 Pre-Assess 开始，覆盖执行、修复、检查与 Post-Assess；停止意图、30 秒默认宽限与实际退出分别持久化。
+
+- AI 起草无需先选 Workflow，独立选择项目 runner；每次请求固定配置、草稿和资料。manual 不调用，失败保留草稿；人工编辑、切换模式、更换 runner 与冻结竞争时不覆盖正文。重启不重复调用或应用；AI 无冻结、启动或 main 写入权限。
 
 ## 3. 成果与错误 Gate
 
@@ -90,7 +94,7 @@ CLI 随各阶段提供可操作的验证入口。每阶段完成验收后进入�
 
 **依赖：** 阶段 4 的完整运行能力与真实运行档案。
 
-**交付物：** Requirement、Workflow/DAG 预览、运行状态、Diff、证据、成果审核、错误处置与双重预算、交付页面及 runner、调用和停止对账详情；Artifact 可用性、交换包与本地清理页面；运行精炼的独立外部 Agent 会话、记录筛选、建议、采纳、验证与清理；精炼 CLI。界面与 CLI 使用相同服务和校验规则。
+**交付物：** Requirement 起草模式切换、独立 runner、草稿编辑、候选 Diff、问题与冻结确认页面；Workflow/DAG 预览、运行状态、Diff、证据、成果审核、错误处置与双重预算、交付页面及 runner、调用和停止对账详情；Artifact 可用性、交换包与本地清理页面；运行精炼的独立外部 Agent 会话、记录筛选、建议、采纳、验证与清理；精炼 CLI。界面与 CLI 使用相同服务和校验规则。
 
 **验收条件：**
 
@@ -100,6 +104,8 @@ CLI 随各阶段提供可操作的验证入口。每阶段完成验收后进入�
 - 至少一项真实运行经验转化为经验证的改进，并在同一提交中清理对应记录。
 - 部分采纳、验证失败、来源变化、会话中断和回退均可处理；保留未解决问题及有效引用，不误删活动、待审核或待交付证据。
 - Artifact 页面区分本地可用、尚未导入、已在本地清理和缺失/损坏；导入既有内容与新增证据分开。Refinement 不自动 purge，Git 回退不显示为已恢复被删除的 Artifact。
+
+- 起草页面与 CLI 使用相同模式、写回、撤销及摘要确认规则；关闭页面不自动取消调用。缺少 runner 时仍可手动完成，候选待审阅与已应用清晰区分。
 
 Codex、Claude Code、OpenCode、Pi Agent 是 Adapter 接入目标；阶段 2 先完成一种，其他按同一协议逐项验证，不要求自建模型或工具循环。
 

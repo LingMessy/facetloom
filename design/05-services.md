@@ -44,7 +44,8 @@ Runtime 首次使用 clone 时生成 UUIDv4，保存为 `.runtime/identity.yaml`
 ```text
 .facetloom/.runtime/
 ├── identity.yaml             # schema_version: 1、runtime_id；不进入 Git
-├── requirements/<uuid>/      # requirement.md、frozen.yaml；冻结绑定不可变
+├── settings.yaml            # 当前 clone 的起草默认模式与 runner
+├── requirements/<uuid>/      # requirement.md、drafting.yaml、frozen.yaml
 ├── runs/<run-id>/             # 完整状态、不可变快照与交付意图
 ├── transactions/<operation-id>/ # manifest、payloads、COMMITTED、APPLIED
 ├── worktrees/<attempt-id>/    # detached Worktree
@@ -62,7 +63,7 @@ Runtime 首次使用 clone 时生成 UUIDv4，保存为 `.runtime/identity.yaml`
 
 ## 本地文件事务
 
-文件是本地执行状态的事实来源；SQLite 可以从文件重建。事务覆盖 Requirement 冻结绑定、Run、CombinationRun、Attempt、Worker、Invocation、评估任务标记、恢复额度及外部动作意图，避免逐个 YAML 写入造成半更新。
+文件是本地执行状态的事实来源；SQLite 可以从文件重建。事务覆盖 Requirement 草稿、起草请求与冻结绑定、Run、CombinationRun、Attempt、Worker、Invocation、评估任务标记、恢复额度及外部动作意图，避免逐个 YAML 写入造成半更新。
 
 ```text
 transactions/<operation-id>/
@@ -93,7 +94,7 @@ side_effects:
 
 ### 提交协议
 
-1. 获取该 Run 的进程级排他文件锁，检查 operation_id、预期摘要、sequence 与运行有效性。同一 Run 的状态、任务和额度变更共用此锁；Refinement 使用会话锁。首次冻结使用 Requirement 锁及 `aggregate: {kind: requirement, id: <requirement-id>}`，释放后再获取 Run 锁。
+1. 获取该 Run 的进程级排他文件锁，检查 operation_id、预期摘要、sequence 与运行有效性。同一 Run 的状态、任务和额度变更共用此锁；Refinement 使用会话锁。草稿保存、起草请求、模式切换与冻结使用 Requirement 锁及 `aggregate: {kind: requirement, id: <requirement-id>}`，释放后再获取 Run 锁。settings.yaml 使用 clone 设置锁与 `aggregate: {kind: settings, id: local}`，默认设置复制到草稿时不同时持有两类锁。
 2. 写入完整 payloads 与 manifest，逐个 fsync 文件和目录。此时不改目标文件，不执行外部动作。
 3. COMMITTED 内容包含 manifest 的 SHA-256，通过临时文件与 rename 发布，再 fsync 文件及事务目录；事务目录首次创建也须 fsync transactions 父目录。此刻事务已提交，之后必须完成重放，不能回滚成未发生。
 4. 对每个目标使用同文件系统临时文件、fsync、原子 rename 和目录 fsync 完成替换。删除操作使用 unlink 并 fsync 父目录。当前摘要已是 after_digest 则跳过；等于 before_digest 才写入；两者均不符则隔离该 Run 并报恢复错误，不能覆盖未知更新。
@@ -241,7 +242,7 @@ Refinement 是 Runtime 提供的本地交互功能，不是独立共享审批服
 
 网络为 disabled / outbound；outbound 供外部 Agent 访问模型服务，并受 Runtime 可实施的网络策略限制。只有明确提供可达本地服务或不需要联网的任务才可使用 disabled；纯脚本及必要检查可独立禁网。拒绝无法满足的配置，不将禁网失败误报为代码测试失败。
 
-成果 AI Gate 在新容器/会话中读取固定候选的只读副本，缓存和临时产物位于独立可写目录；错误 Gate 读取 ErrorRecord 与可用证据。每次 Agent Invocation 另有新的专用 `evidence-out/` 目录，以只读输入和可写输出挂载给容器；它与项目 Worktree、原始候选和 Artifact Store 隔离。AI Gate 与 Refinement 的外部 Agent 使用同一证据文件导入协议；Script Gate 只返回已校验的类型化证据引用。即使原生 Agent 关闭内部沙箱，也不能写原 Worker 成果或 main。最终检查与精炼验证使用独立候选副本。
+成果 AI Gate 在新容器/会话中读取固定候选的只读副本，缓存和临时产物位于独立可写目录；错误 Gate 读取 ErrorRecord 与可用证据。支持证据文件输出的 Agent Invocation 另有新的专用 `evidence-out/` 目录，以只读输入和可写输出挂载给容器；它与项目 Worktree、原始候选和 Artifact Store 隔离。AI Gate 与 Refinement 的外部 Agent 使用同一证据文件导入协议；Script Gate 只返回已校验的类型化证据引用。即使原生 Agent 关闭内部沙箱，也不能写原 Worker 成果或 main。最终检查与精炼验证使用独立候选副本。
 
 ### Worker、调用与会话
 
@@ -277,13 +278,13 @@ stopped_at: null
 
 Worker 状态为 pending / running / stop_requested / stopped / unknown，独立于 Attempt 状态。进程引用不能只记 PID：同时记录容器 ID、进程启动身份与 invocation_id，避免 PID 复用误停止其他任务。退出状态以原生调用结果与实际容器对账为准。
 
-Invocation 文件使用以下字段；Adapter 把独立目录以 `/facetloom/evidence-out` 挂载，并在固定请求中指示 Agent 只在此目录写入本次证据。AI Gate 和 Refinement 也共用此记录，不为它们创建业务 Attempt 或 Worker。
+Invocation 文件使用以下字段；支持证据文件输出的调用将独立目录挂载为 `/facetloom/evidence-out`。AI Gate、Refinement 和需求起草也共用此记录，不为它们创建业务 Attempt 或 Worker；draft 的 evidence_dir 为 null，evidence_imports 与 evidence_refs 为空列表。
 
 | 字段 | 定义 |
 | --- | --- |
 | schema_version、invocation_id | 格式为 1，调用 ID 为 UUIDv4 |
-| owner、task_kind | owner 为 `{kind: worker/gate/refinement, id: <所属 ID>}`；task_kind 为 pre_assess / execute / repair / post_assess / evaluate / refine |
-| runner_id、runner_profile_digest | 所属 Run 或精炼会话内的固定调用配置 |
+| owner、task_kind | owner 为 `{kind: worker/gate/refinement/requirement, id: <所属 ID>}`；task_kind 为 pre_assess / execute / repair / post_assess / evaluate / refine / draft |
+| runner_id、runner_profile_digest | 所属 Run、精炼会话或起草请求内的固定调用配置 |
 | adapter_version、agent_version、image_ref | 实际 Adapter / Agent 版本及镜像 digest；程序尚未探测成功时版本可为 null |
 | argv、input_ref、native_output_ref、result_ref | 实际参数、发送前固定的输入 Artifact、原生结构化输出与 Adapter 规范化结果；不含凭据。失败时规范化结果可为空 |
 | evidence_dir、evidence_imports、evidence_refs | 每次调用独立的临时输出目录、逐文件导入回执及成功导入的不可变证据引用；目录本身不是持久引用 |
@@ -294,11 +295,11 @@ Invocation 文件使用以下字段；Adapter 把独立目录以 `/facetloom/evi
 | stop_requested_at、stop_reason、stop_deadline_at | 持久化停止意图、原因与强制终止截止时间；无停止请求时为 null |
 | exit_code、event_refs | 实际退出码与可观测事件引用；未形成时为空 |
 
-每次 Invocation 在调用前创建空的独立 `evidence-out/`，只将该目录挂载到对应容器。容器退出确认后 Adapter 冻结该目录，保存原生输出，校验结构化响应与本次输入提供的证据引用白名单，再按 [Execution](04-execution.md) 的路径规则、单文件和总量上限暂存、摘要校验并导入文件。全部文件导入成功后才生成 `result_ref` 与规范化 `evidence_refs`；失败时两者均不得作为成功结果发布，Invocation 记录故障，ErrorRecord 可引用原生输出及可用诊断材料。导入中已写入但无有效引用的 Artifact 不构成部分 Report，可在确认没有引用后回收。
+支持证据文件输出的 Invocation 在调用前创建空的独立 `evidence-out/`，只将该目录挂载到对应容器。容器退出确认后 Adapter 冻结该目录，保存原生输出，校验结构化响应与本次输入提供的证据引用白名单，再按 [Execution](04-execution.md) 的路径规则、单文件和总量上限暂存、摘要校验并导入文件。全部文件导入成功后才生成 `result_ref` 与规范化 `evidence_refs`；失败时两者均不得作为成功结果发布，Invocation 记录故障，ErrorRecord 可引用原生输出及可用诊断材料。导入中已写入但无有效引用的 Artifact 不构成部分 Report，可在确认没有引用后回收。
 
 续接只能引用同一 Attempt 的 execute / repair 调用、相同固定 runner 的原生会话；Post-Assess 不得复用可写执行容器或会话。恢复时重新核实镜像、程序版本及 Adapter 兼容性，不能静默切换运行方式。
 
-runner.timeout_seconds 从首次 Pre-Assess 调用发出前持久化 started_at / deadline_at 开始计时，覆盖预检、执行、同次修复、检查和只读 Post-Assess；排队、输入准备、Gate 等待和最终采纳不计入。Runtime 重启不重置 deadline。达到总时限为 execution_timeout，停止当前调用或检查并保存实际结果，Attempt failed 后转错误 Gate；单个检查自身先超时仍按 CheckReport 的 failed 处理。每次 Agent 调用还受同一 runner.timeout_seconds 单次限制。AI Gate 评估与 Refinement 不属于 Attempt，采用各自调用的时限。
+runner.timeout_seconds 从首次 Pre-Assess 调用发出前持久化 started_at / deadline_at 开始计时，覆盖预检、执行、同次修复、检查和只读 Post-Assess；排队、输入准备、Gate 等待和最终采纳不计入。Runtime 重启不重置 deadline。达到总时限为 execution_timeout，停止当前调用或检查并保存实际结果，Attempt failed 后转错误 Gate；单个检查自身先超时仍按 CheckReport 的 failed 处理。每次 Agent 调用还受同一 runner.timeout_seconds 单次限制。AI Gate 评估、Refinement 与需求起草不属于 Attempt，采用各自调用的时限。
 
 ### 停止与恢复
 
@@ -307,7 +308,33 @@ runner.timeout_seconds 从首次 Pre-Assess 调用发出前持久化 started_at 
 3. 确认进程及容器退出后记 stopped，再回收 Worktree、会话与资源额度。查询失败记 unknown，不当作已退出，也不重复启动。
 4. 无法停止则保留资源引用，隔离旧任务并转人工对账。隔离须确认旧任务无法再访问新 Worktree 或受信写入接口；仅写一个“已隔离”标记不够。
 
-Runtime 重启先恢复文件事务，再按容器/Invocation 身份对账；已有活跃进程可重新监控，不新启动第二个进程。只有支持原生恢复且能证明原调用已退出时才恢复同一会话；若不能安全恢复，原 Attempt 失败，经错误 Gate 创建新 Attempt。Gate 或精炼调用同样先撤销、再停止，迟到输出不恢复旧任务。
+Runtime 重启先恢复文件事务，再按容器/Invocation 身份对账；已有活跃进程可重新监控，不新启动第二个进程。只有支持原生恢复且能证明原调用已退出时才恢复同一会话；若不能安全恢复，原 Attempt 失败，经错误 Gate 创建新 Attempt。Gate、精炼和起草调用同样先撤销、再停止，迟到输出不恢复旧任务。
+
+## 起草调用协调
+
+需求起草由 Runtime 协调，文件和交互规则见 [Requirement](02-requirement.md#需求起草)。Invocation 使用 `owner: {kind: requirement, id: <requirement-id>}`、`task_kind: draft`，不创建 Run、Attempt 或 Worker。
+
+每次请求使用新的隔离容器和原生会话。调用输入 Artifact 保存草稿原始字节及摘要、用户指令、提供的交互记录、当时 main 的 base_commit、资料引用，以及与 Run.runners 同结构的完整 runner 配置和来源。Adapter 的 input_ref 记录实际发送内容，禁止只留文件名或依赖易变的 main 引用。请求时限为固定 runner.timeout_seconds。
+
+容器仅挂载草稿副本、固定项目资料的只读副本与独立输出目录；不挂载真实 `.runtime/`、可写主仓库或 Git 管理凭据。没有 Workflow 时仍可使用同一 Podman 与 Adapter 能力。起草输出使用独立的最小结构：
+
+```json
+{
+  "schema_version": 1,
+  "requirement_id": "9e2c1f78-6a54-4d92-8e31-05b7a19c2f60",
+  "candidate_markdown": "<完整候选 Markdown，保留原 UUID 和 front matter>",
+  "summary": "整理验收条件，限制期仍需用户明确。",
+  "questions": ["限制期应配置为多长？"]
+}
+```
+
+candidate_markdown 和 summary 为非空文本，questions 为字符串列表，可空；候选允许未完成的草稿，但身份与格式必须有效。questions 是待澄清内容，不作验收事实。本阶段不接收 draft 的 evidence_files 或 evidence_refs；用户输入与固定资料随 input_ref 留存，候选随 result_ref 留存，Diff 由原文和候选计算，不增加独立报告或证据协议。
+
+发起请求前先持久化 Invocation、drafting.yaml 请求项与调用意图；input_ref 必须已持久可读。完成时校验结构化结果并保存候选 Artifact，再在 Requirement 锁下复核摘要与请求有效性，将草稿写回、applied 结果及 active_invocation_id 清空作为同一事务提交。需要人工查看的候选记 needs_review；故障记 failed，撤销记 cancelled。任何终态都清除匹配的 active_invocation_id，不清除后来创建的新请求；撤销后的迟到输出不改变 cancelled 结果。原生 succeeded 不等于已应用草稿，重放按 invocation_id 与已保存处理结果去重。
+
+没有有效 runner、启动失败或超时均显示起草故障，保持草稿可手动编辑。恢复先重放事务，再按容器和进程身份对账；unknown 不重复启动。调用已退出且结果可验证时执行同样的写回检查，否则记录失败供用户重试。旧调用尚未确认退出或隔离时，不启动新的起草调用；已撤销调用不能阻止人工编辑或冻结。取消、切换模式与冻结共用停止协议，停止不要求 Agent 自己同意。
+
+起草相关 Artifact 在请求开始前登记保护，候选发布与引用登记复用库协议；锁顺序为 Requirement → Artifact 库，不持有 Run 锁。请求历史和 frozen.yaml 分别保留其引用，默认不自动清理；它们在 purge 时与其它本地有效记录一起检查。项目默认设置仅在新草稿创建时复制，起草模式不影响 Gate 策略。
 
 ## Agent Adapter
 
@@ -315,7 +342,7 @@ Adapter 是外部程序协议适配层，不实现模型推理、工具循环或
 
 | 操作 / 能力 | 规则 |
 | --- | --- |
-| probe | 探测版本、参数、任务输入、结构化结果（含 `evidence_refs` 与可选 `evidence_files`）及事件能力；不支持所需能力时显式报错 |
+| probe | 探测版本、参数、任务输入、所需任务的结构化结果及事件能力；draft 校验候选协议，其它 Agent 任务校验包含 `evidence_refs` 与可选 `evidence_files` 的协议；不支持时显式报错 |
 | start | 使用固定 runner 启动外部 Agent，传入工作目录、任务及资料；args 不经 Shell 展开 |
 | continue | 把检查失败或用户反馈传给原生会话；不支持时进入错误处置，不自己补一个 Agent 循环 |
 | recover | 可选；核实已有进程、原生会话及调用状态，不能把 unknown 当作未发送 |
@@ -323,6 +350,6 @@ Adapter 是外部程序协议适配层，不实现模型推理、工具循环或
 
 Adapter 先保存每次实际调用输入，再原样传入外部程序；首次 Pre-Assess 输入使用 agent_input_ref，执行与修复等后续调用分别由 Invocation 引用输入，审核输入使用 GateReport.request_input_ref。证据输出由 Agent 通过 `evidence_files` 提交，已有证据使用 `evidence_refs`；导入规则及上限见 [Execution](04-execution.md)。AI Gate 与 Refinement 也使用该协议，Refinement 会话记录其导入引用，Script Gate 只能引用输入中已有且已校验的类型化证据。模型服务凭据由环境或连接层注入，不进入记录；不挂载宿主机原生配置或跨 Attempt 共享会话。
 
-pre_assess 调用的原生结构化输出解析成 PreAssessReport 内容，execute / repair 解析成 ExecutionResult，post_assess 解析成 Post-AssessReport 内容，均存于 result_ref。AI Gate 输出解析为 result 或 action、rationale、evidence_refs、evidence_files 及条件必填修复字段；Refinement 返回的建议使用相同的证据字段。Adapter 将 `evidence_files` 转为正式 Artifact `evidence_refs` 后才保存规范化结果；持久报告不包含 Agent 临时路径。结构化输出不完整、证据引用越权、导入失败或仅有成功退出码时，调用不能视为成功；Adapter 不发起第二模型调用补写结果，不创建 Decision 或接受成果。
+draft 调用按起草协议解析候选；pre_assess 调用的原生结构化输出解析成 PreAssessReport 内容，execute / repair 解析成 ExecutionResult，post_assess 解析成 Post-AssessReport 内容，均存于 result_ref。AI Gate 输出解析为 result 或 action、rationale、evidence_refs、evidence_files 及条件必填修复字段；Refinement 返回的建议使用相同的证据字段。Adapter 将 `evidence_files` 转为正式 Artifact `evidence_refs` 后才保存规范化结果；持久报告不包含 Agent 临时路径。结构化输出不完整、证据引用越权、导入失败或仅有成功退出码时，调用不能视为成功；Adapter 不发起第二模型调用补写结果，不创建 Decision 或接受成果。
 
-FacetLoom 只承诺保存自己提供的输入和可观测事件；外部 Agent 的内部系统提示、隐藏推理、压缩过程及未暴露的模型/工具信息不在可追溯承诺内。任务执行、AI 评估、精炼使用各自隔离的原生会话。接入协议属于设计目标，不表示四种 Adapter 已全部实现。
+FacetLoom 只承诺保存自己提供的输入和可观测事件；外部 Agent 的内部系统提示、隐藏推理、压缩过程及未暴露的模型/工具信息不在可追溯承诺内。任务执行、AI 评估、精炼与需求起草使用各自隔离的原生会话。接入协议属于设计目标，不表示四种 Adapter 已全部实现。

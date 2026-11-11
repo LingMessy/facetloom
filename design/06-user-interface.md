@@ -25,7 +25,7 @@
 
 | 页面 | 展示内容 | 人类操作 |
 | --- | --- | --- |
-| Requirement | 本地草稿、冻结需求、关联 Run、已采纳历史 | 编辑草稿、冻结并启动 Run；修改冻结需求则创建新 UUID |
+| Requirement | 起草模式、runner、草稿与 AI Diff、冻结需求、关联 Run、已采纳历史 | 编辑、请求 AI 辅助、切换模式、审阅并冻结、启动 Run；修改冻结需求则创建新 UUID |
 | Workflow | Facet、Scope、校验、DAG 预览 | 审阅定义修改并发布 |
 | Run | 本地状态与已采纳档案、结果、问题和证据 | 取消、重试、请求交付或明确放弃未交付成果 |
 | 成果 Gate | 各 Node 的模式、审核要求、报告、主体与汇总状态 | 人工项决策、批量确认、异常接管或请求重评 |
@@ -36,6 +36,39 @@
 | Local Runtime | runner、Worker、容器、原生调用、本地事务与交付意图、同步与恢复 | 停止 Worker、恢复本地运行 |
 
 需求列表按 main 采纳顺序显示“第几个需求 · 标题 · 短 UUID”；序号仅作导航，详情与操作始终使用 UUID。未采纳草稿和运行单列。Git revert 后仍可查看历史采纳及回撤标记，不提供重新交付原需求的入口。
+
+## 需求起草交互
+
+```text
+新需求 → 复制本地默认模式与 runner
+    ├─ AI 辅助：输入意图 → 提交请求 → 候选写回 / 待审阅 Diff
+    └─ 手动：直接编辑
+              ↕ 随时切换，保留正文
+        人类审阅当前内容 → 按摘要确认冻结 → 选择 Workflow 并启动
+```
+
+起草页展示模式切换、独立 runner 选择、正文编辑器、AI 修改 Diff、待澄清事项和调用状态。设置页提供“新需求默认模式与 runner”，当前需求也可显式保存选择为本 clone 默认；已有草稿不跟随默认值变化。
+
+打开页面和切换模式不自动发起调用。AI 辅助模式中，用户点击“起草 / 整理”才发送当前正文与指令；runner 未选择或不可用时提示配置，并保留手动编辑入口。manual 不调用 AI。冻结前可反复切换，已有改动不会因切换丢失。
+
+结果符合写回条件时更新正文并展示修改前后 Diff；并发编辑导致候选过期时显示“候选待审阅，未覆盖当前草稿”，用户可参考候选继续编辑或重新请求。调用失败展示原因与重试入口，保留原文；待澄清问题与正文分开，不显示为已满足的验收条件。
+
+冻结确认页展示当前完整正文及未解决问题提示，提交绑定该正文摘要。内容变化须重新审阅；成功后编辑、AI 请求和模式切换入口关闭。冻结与启动是独立的人类操作，也可提供组合按钮，但必须先完成冻结确认，再按 WorkflowRun 启动流程校验；起草 Agent 不能触发这些动作。
+
+CLI 与页面调用相同服务，提供下列入口；参数中的 mode 仅为 `ai_assisted` / `manual`：
+
+```text
+facetloom requirement create [--mode <mode>] [--runner <id>]
+facetloom requirement edit <uuid>           # 编辑副本，保存时校验原摘要
+facetloom requirement mode <uuid> <mode>
+facetloom requirement runner <uuid> <id>
+facetloom requirement assist <uuid> --instruction <text>
+facetloom requirement show <uuid>            # 正文、模式、候选 Diff 与问题
+facetloom requirement cancel-assist <uuid>
+facetloom requirement freeze <uuid>         # 展示并确认当前正文
+```
+
+CLI 冻结在确认后提交展示过的摘要；没有人类确认时不自动冻结。CLI 编辑器修改草稿副本，保存时通过同一服务比较原摘要；冲突时保留编辑结果供重新审阅。绕过服务直接编辑 requirement.md 时，应先取消 AI 起草请求；外部文件写入不受 Runtime 锁保护。保存正文、模式切换、取消及冻结的并发规则以 [Requirement](02-requirement.md#需求起草) 为准。
 
 ## DAG 与 Gate
 

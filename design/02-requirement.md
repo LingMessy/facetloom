@@ -68,7 +68,7 @@ title: 登录失败限制
 - docs/authentication.md
 ```
 
-首次冻结在 Requirement 锁下保存 `.runtime/requirements/<requirement-id>/frozen.yaml`，内容为 `{schema_version: 1, requirement_id, requirement_ref}`；Artifact 先持久化，绑定通过本地文件事务写入且不再修改。后续启动只使用该绑定，校验工作副本与冻结字节一致；它与各 Run 共同参与本地引用保护。此锁不与 Run 锁同时持有。
+首次冻结须由人类确认当前草稿摘要，在 Requirement 锁下复核字节未变，并保存 `.runtime/requirements/<requirement-id>/frozen.yaml`，内容为 `{schema_version: 1, requirement_id, requirement_ref}`。同一事务撤销在途起草请求并保存停止意图；人类确认后若草稿已变，须重新审阅。Artifact 先持久化，冻结绑定提交后不再修改。后续启动只使用该绑定，校验工作副本与冻结字节一致；它与各 Run 共同参与本地引用保护。此锁不与 Run 锁同时持有。
 
 Front matter 必填 `schema_version: 1`、`requirement_id` 和非空 `title`，ID 与文件路径一致；正文必有非空 Goal 和至少一条 Acceptance Criteria。Constraints 和 References 可为空。仓库资料按所属 Run 的 source_commit 解析；外部引用须固定 Commit 或内容哈希，不写入凭据。
 
@@ -87,6 +87,74 @@ Front matter 必填 `schema_version: 1`、`requirement_id` 和非空 `title`，I
 展示按 main 历史中的采纳顺序排列，使用“第几个需求 · 标题 · 短 UUID”；序号是当前视图的位置，不写入身份或用于引用。祖先先于后代；手工 Git 合并形成并列历史时，以 Commit OID 稳定排序，序号可随同步改变。草稿与未采纳运行单独展示，不占采纳序号。
 
 Git revert 可回撤采纳的需求、代码和档案，历史采纳事实仍在，不自动重启或再次交付原需求。后续修改使用新需求；Git 回退不恢复已 purge 的 Artifact。
+
+## 需求起草
+
+起草独立于 Workflow，模式也独立于 Gate。AI 可以修改本地草稿，人类负责审阅、冻结和启动运行。
+
+| 模式 | 行为 |
+| --- | --- |
+| ai_assisted（默认） | 用户提交请求后，调用外部 Agent 起草、整理、指出歧义或完善验收条件；显示修改 Diff |
+| manual | 用户直接编辑；不发起 AI 请求，也不要求 runner 或模型服务可用 |
+
+打开页面或切换到 AI 辅助不会自动发起调用。未确定的业务内容作为待澄清事项显示，不能写成已确认事实。草稿可不完整，冻结时才要求完整目标和验收条件。
+
+### 本地设置与文件
+
+```text
+.facetloom/.runtime/
+├── settings.yaml
+└── requirements/<uuid>/
+    ├── requirement.md    # 草稿正文；冻结后保持原始字节
+    ├── drafting.yaml    # 模式、runner、有效请求及处理结果
+    └── frozen.yaml      # 人类确认后的不可变绑定
+```
+
+settings.yaml 中的起草设置：
+
+```yaml
+schema_version: 1
+requirement_drafting:
+  mode: ai_assisted
+  runner_id: null
+```
+
+无设置时使用上述默认值。新需求复制当前 clone 的默认模式和 runner，可单独覆盖；修改默认值只影响之后创建的需求。用户可显式保存当前选择为项目本地默认值。设置文件不进入 Git，不改变 runner 定义；非法模式报配置错误，不静默调用 AI。
+
+drafting.yaml 示例：
+
+```yaml
+schema_version: 1
+requirement_id: 9e2c1f78-6a54-4d92-8e31-05b7a19c2f60
+mode: ai_assisted
+runner_id: null
+active_invocation_id: null
+requests: []
+```
+
+`requests` 按请求顺序保存 invocation_id、候选 result_ref、处理结果和简短原因；处理结果为 pending、applied、needs_review、failed 或 cancelled。未形成结果时 result_ref 为 null；applied 同时记录写入后草稿摘要。调用输入保存修改前字节，因此可生成 Diff。候选、交互与引用材料均保留本地并参与 Artifact 引用保护，最终采纳只提交冻结的 Requirement 正文，不自动归档起草过程。
+
+runner 从项目 main 中已有定义独立选择，不要求先选 Workflow；默认未配置或不可用时提示选择或切换手动，不自动借用执行 runner。每次请求固定当时的 main Commit、所选 runner 完整配置及来源、草稿字节与摘要、用户指令和提供的资料。起草 Commit 只用于解释该次建议，不充当之后 WorkflowRun 的 source_commit；启动仍按最新本地 main 固定执行基线。
+
+### 请求、写回与冻结
+
+```mermaid
+flowchart LR
+    D[本地草稿] --> U[用户提交起草请求]
+    U --> A[隔离副本中调用外部 Agent]
+    A --> C[候选 Markdown 与待澄清事项]
+    C --> V{原摘要与有效请求仍匹配且未冻结}
+    V -->|是| W[事务写回草稿并显示 Diff]
+    V -->|否| K[保留候选供查看，不覆盖正文]
+    W --> H[人类编辑与审阅]
+    H --> F[按当前摘要确认冻结]
+```
+
+Agent 只接触草稿副本和只读项目资料；候选由 Runtime 校验 Markdown 格式、schema_version 和原 requirement_id 后写回。它不直接访问正式草稿、冻结绑定或 main，也不能冻结需求或启动 Run。调用失败、身份变化或结果无效均保留原草稿，用户可重试或手动处理，不创建错误 Gate。
+
+同一需求最多一个有效请求。应用结果、手动保存、切换模式和冻结共用 Requirement 锁与本地事务；UI/CLI 保存和冻结必须携带当前已审阅正文的摘要。写回时还检查 active_invocation_id、模式和未冻结状态，不能仅因正文摘要相同就接收已撤销的结果。人工编辑造成摘要变化时，候选标为 needs_review；不得自动合并覆盖新内容。
+
+切换 manual、更换 runner 或取消请求时，先撤销有效请求并保存停止意图，再停止容器。切换保留草稿与历史；迟到结果只作诊断材料，不自动写回。人类冻结同样撤销在途请求；隔离副本不会阻止冻结，但未知进程必须继续对账。重启先恢复事务与调用状态，不重复请求或重复应用；未知结果不当作未执行。具体调用协议见 [起草调用协调](05-services.md#起草调用协调)。
 
 ## WorkflowRun
 
@@ -120,7 +188,7 @@ WorkflowRun 的必需字段如下：
 
 启动流程：
 
-1. 校验需求文件并冻结为 Artifact；检查 UUID 未被采纳。读取本地 main 完整 OID 为 source_commit，无需 remote 或先 fetch。
+1. 校验人类确认的冻结绑定；“冻结并启动”先按起草协议确认当前摘要并完成冻结。检查 UUID 未被采纳，再读取本地 main 完整 OID 为 source_commit，无需 remote 或先 fetch。
 2. 校验 Workflow、Facet、必要检查、runner、成果及错误 Gate、评估器和引用资料；拒绝使用运行档案作为定义或资料输入。
 3. 生成并校验 DAG。若显式替代本地未终态 Run，先在旧 Run 锁下持久化替代操作 ID、新 run_id、调度撤销与停止意图，释放锁后再创建新 Run；旧 Run 已停止而新建失败时，以同一操作 ID 幂等重试，不恢复旧执行。不同时持两个 Run 锁。将新 run.yaml、dag.yaml、冻结需求引用及初始状态原子持久化。
 4. 再次校验 main 的正式输入仍匹配 source_commit、需求尚未采纳，然后调度节点。启动不写 main；正式输入变化则阻塞，要求固定新基线的新 Run。

@@ -163,8 +163,8 @@ execution:
 
 以 `login × domain` 为例：Facet 定义中的 login 和 domain Node 组合成一个静态 Combination Node；本次 WorkflowRun 为它保存一条 CombinationRun，首次执行创建 Attempt。错误恢复创建新的 Attempt，同次预算内修复继续使用原 Attempt；审核依据始终绑定对应尝试。对象边界见 [运行对象生命周期](02-requirement.md#运行对象生命周期)。
 
-1. main 已有 Workflow、Facet、runner、审核配置和项目代码；本地准备固定 digest 的镜像与凭据。创建 UUID 需求草稿，写明目标和验收条件，无需 remote。
-2. 人类确认后冻结需求原始字节为 requirement_ref；Runtime 固定 source_commit，生成 DAG，本地事务创建 Run。此时 main 不变。
+1. main 已有 Workflow、Facet、runner、审核配置和项目代码；本地准备固定 digest 的镜像与凭据。创建 UUID 草稿时复制本 clone 默认模式（初始为 ai_assisted）；独立选择起草 runner 并提交请求，AI 整理目标和验收条件。用户可随时切换 manual；无可用 Agent 时仍可手动完成，无需 remote 或先选 Workflow。
+2. 人类审阅正文、AI Diff 与待澄清事项，按当前草稿摘要确认冻结为 requirement_ref，同时撤销在途起草请求。再选择 Workflow 并启动，Runtime 以此时的 main 固定 source_commit，生成 DAG，本地事务创建 Run；起草基线不代替执行基线。此时 main 不变。
 3. Runtime 先创建 preparing Attempt，再固定代码输入和 Context Snapshot。Adapter 探测外部 Agent、保存初始请求，以只读容器和独立会话运行 Pre-Assess；Invocation 记录版本、argv 和 session_id。固定引用暂不可读可进入错误 Gate 等待，补充需求则创建新 UUID，不修改冻结文件。
 4. 适用时调用外部 Agent，校验并留存 ExecutionResult；不适用则复用输入。Runtime 执行累积的必要检查，适用任务可在预算内续接修复并全量重检；固定最终 Tree 后保存 Checkpoint、CheckReport、只读 Post-Assess、bundle 与证据，计算 review_input_digest。本地 waiting_gate 事务落地后开始审核。
 5. 各成果 Gate 可并行：AI 使用独立会话，脚本直接运行程序。报告是审核输出，不修改执行证据。全部批准与关联状态本地落地后，才解锁后继。
@@ -271,6 +271,23 @@ Git 外的独立交换文件
 ```
 
 ## 验收场景
+
+### 需求起草
+
+| 场景 | 预期 |
+| --- | --- |
+| 首次创建、修改 clone 默认值、逐需求覆盖 | 初始 ai_assisted；默认值只影响新草稿，已有需求保留自己的选择 |
+| 未选 Workflow、起草 runner 与执行 runner 不同 | 可独立起草；每次请求固定自身 runner、main 和资料 |
+| 打开页面、切换 ai_assisted / manual | 不自动调用；保留正文，manual 不发起 AI 请求 |
+| runner 不可用、Agent 失败或无效候选 | 保留原草稿，显示故障，可重试或手动完成；不创建错误 Gate |
+| AI 候选身份匹配、原摘要未变 | 原子写回正文并保存 Diff 依据；UUID 不变 |
+| AI 返回前人工编辑、或先修改再恢复原文但已撤销请求 | 前者保留候选待审阅，后者不能接收已撤销结果 |
+| 切换 manual、更换 runner、冻结时仍有请求 | 保存撤销和停止意图；迟到结果不写回 |
+| 人类确认后正文又变化 | 拒绝过期冻结确认，要求重新审阅 |
+| 写回或冻结事务提交后崩溃 | 重放已提交结果，不重复写回、冻结或启动 Run |
+| 起草完成、请求仍在途或失败 | 均不授予 Agent 冻结、启动或 main 写入权限 |
+
+### 执行与协作
 
 | 场景 | 预期结果 |
 | --- | --- |
